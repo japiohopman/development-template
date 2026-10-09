@@ -45,7 +45,7 @@ Environment definitions and Environment secrets do **not** carry over when a rep
 
 The code here is intentionally provider-neutral. A production implementation still needs:
 - a provider adapter and source/repository identity verification;
-- deterministic Issue selection and dependency validation;
+- deterministic Issue selection and dependency validation (`selectCandidateIssue`);
 - durable claims with compare-and-swap semantics and stale-claim recovery;
 - session creation with an explicit dispatch confirmation;
 - reconciliation across provider sessions, issues, branches, and PRs;
