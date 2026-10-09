@@ -1,0 +1,15 @@
+{
+  "name": "development-autoloop-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-neutral foundation for safe issue-first development automation",
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "check": "node --check src/preflight.mjs && node --check src/pagination.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
