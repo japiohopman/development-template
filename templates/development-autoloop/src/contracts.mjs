@@ -1,15 +1,13 @@
 /**
- * Contract validation for Issues and Pull Requests.
- * Validates required sections and metadata against configuration or defaults.
- * Pure and read-only.
+ * Pure, read-only validation for governing Issues and implementation PRs.
+ * Diagnostics use stable machine-readable codes and JSON-pointer-like paths.
  */
-
 export const DEFAULT_REQUIRED_ISSUE_SECTIONS = [
   'Scope',
   'Acceptance criteria',
   'Dependencies',
   'Out of scope',
-  'Validation plan',
+  'Validation plan'
 ];
 
 export const DEFAULT_REQUIRED_PR_SECTIONS = [
@@ -19,15 +17,52 @@ export const DEFAULT_REQUIRED_PR_SECTIONS = [
   'Acceptance criteria evidence',
   'Verification',
   'Risks and blockers',
-  'Handoff',
+  'Handoff'
 ];
 
+const ISSUE_REFERENCE_PATTERN = /(?:#[1-9]\d*|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/[1-9]\d*)\b/i;
+
+function pointer(segments) {
+  if (segments.length === 0) return '/';
+  return '/' + segments.map((part) => String(part).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+}
+
+function diagnostic(path, code, message) {
+  return { path: pointer(path), code, message };
+}
+
+function compareText(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function sortDiagnostics(errors) {
+  return errors.sort((a, b) =>
+    compareText(a.path, b.path) ||
+    compareText(a.code, b.code) ||
+    compareText(a.message, b.message)
+  );
+}
+
+function getBody(input, entityName) {
+  if (typeof input === 'string') return { body: input, errors: [] };
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    if (typeof input.body !== 'string') {
+      return { body: '', errors: [diagnostic(['body'], 'BODY_MUST_BE_STRING', entityName + ' body must be a string.')] };
+    }
+    return { body: input.body, errors: [] };
+  }
+  return {
+    body: '',
+    errors: [diagnostic([], 'INVALID_CONTRACT_INPUT', entityName + ' input must be a string or an object with a body property.')]
+  };
+}
+
 /**
- * Extract sections and their text contents from markdown body.
- * Recognizes markdown headings (# Section, ## Section, etc.) and bold standalone titles (**Section** or **Section:**).
- *
- * @param {string} body - Markdown content.
- * @returns {Map<string, string>} Map of normalized section names to content strings.
+ * Extract Markdown sections, recognizing hash headings and bold standalone titles.
+ * @param {string} body
+ * @returns {Map<string, string>}
  */
 export function extractMarkdownSections(body) {
   const sections = new Map();
@@ -49,156 +84,106 @@ export function extractMarkdownSections(body) {
       const boldMatch = trimmed.match(/^\*\*(.+?)\*\*:?\s*(.*)$/);
       if (boldMatch) {
         foundHeading = boldMatch[1].trim();
-        if (boldMatch[2] && boldMatch[2].trim()) {
-          initialInlineContent = boldMatch[2].trim();
-        }
+        if (boldMatch[2] && boldMatch[2].trim()) initialInlineContent = boldMatch[2].trim();
       }
     }
 
     if (foundHeading) {
-      if (currentSection) {
-        sections.set(currentSection.toLowerCase(), currentContent.join('\n').trim());
-      }
+      if (currentSection) sections.set(currentSection.toLowerCase(), currentContent.join('\n').trim());
       currentSection = foundHeading;
-      currentContent = initialInlineContent !== null ? [initialInlineContent] : [];
+      currentContent = initialInlineContent === null ? [] : [initialInlineContent];
     } else if (currentSection) {
       currentContent.push(line);
     }
   }
 
-  if (currentSection) {
-    sections.set(currentSection.toLowerCase(), currentContent.join('\n').trim());
-  }
-
+  if (currentSection) sections.set(currentSection.toLowerCase(), currentContent.join('\n').trim());
   return sections;
 }
 
-/**
- * Validate governing Issue contract.
- *
- * @param {object|string} issueInput - Issue object or body string.
- * @param {object} [options] - Options or autoloop configuration.
- * @param {string[]} [options.requiredIssueSections] - Array of required section titles.
- * @returns {{ valid: boolean, errors: Array<{ path: string, message: string }> }}
- */
-export function validateIssueContract(issueInput, options = {}) {
+function requiredSectionsErrors(body, requiredSections) {
   const errors = [];
+  const parsed = extractMarkdownSections(body);
 
-  let body = '';
-  if (typeof issueInput === 'string') {
-    body = issueInput;
-  } else if (issueInput && typeof issueInput === 'object') {
-    if (typeof issueInput.body !== 'string') {
-      errors.push({ path: 'body', message: 'Issue body must be a string.' });
+  for (const sectionName of requiredSections) {
+    const normalized = sectionName.toLowerCase();
+    const path = ['body', 'sections', sectionName];
+    if (!parsed.has(normalized)) {
+      errors.push(diagnostic(path, 'REQUIRED_SECTION_MISSING', 'Required section "' + sectionName + '" is missing.'));
     } else {
-      body = issueInput.body;
-    }
-  } else {
-    return {
-      valid: false,
-      errors: [{ path: '$', message: 'Issue input must be a string or object with a body property.' }],
-    };
-  }
-
-  if (typeof body === 'string' && body.trim() === '') {
-    errors.push({ path: 'body', message: 'Issue body cannot be empty.' });
-  }
-
-  const requiredSections = Array.isArray(options?.requiredIssueSections)
-    ? options.requiredIssueSections
-    : Array.isArray(options?.config?.requiredIssueSections)
-    ? options.config.requiredIssueSections
-    : DEFAULT_REQUIRED_ISSUE_SECTIONS;
-
-  if (typeof body === 'string' && body.trim() !== '') {
-    const parsedSections = extractMarkdownSections(body);
-
-    for (const sectionName of requiredSections) {
-      const normalizedKey = sectionName.toLowerCase();
-      if (!parsedSections.has(normalizedKey)) {
-        errors.push({
-          path: `body.sections.${sectionName}`,
-          message: `Missing required section "${sectionName}".`,
-        });
-      } else {
-        const content = parsedSections.get(normalizedKey);
-        if (!content || content.trim() === '') {
-          errors.push({
-            path: `body.sections.${sectionName}`,
-            message: `Required section "${sectionName}" is empty.`,
-          });
-        }
+      const content = parsed.get(normalized);
+      if (!content || content.trim() === '') {
+        errors.push(diagnostic(path, 'REQUIRED_SECTION_EMPTY', 'Required section "' + sectionName + '" is empty.'));
       }
     }
   }
 
-  return {
-    valid: errors.length === 0,
-    errors,
-  };
+  return { parsed, errors };
+}
+
+function resolveRequiredSections(options, optionKey, defaultSections) {
+  const direct = options && options[optionKey];
+  if (Array.isArray(direct) && direct.length > 0) return direct;
+  const configured = options && options.config && options.config[optionKey];
+  if (Array.isArray(configured) && configured.length > 0) return configured;
+  return defaultSections;
 }
 
 /**
- * Validate implementation Pull Request contract.
- *
- * @param {object|string} prInput - PR object or body string.
- * @param {object} [options] - Options or autoloop configuration.
- * @param {string[]} [options.requiredPRSections] - Array of required section titles.
- * @returns {{ valid: boolean, errors: Array<{ path: string, message: string }> }}
+ * Validate required Issue sections.
+ * @param {object|string} issueInput
+ * @param {object} [options]
+ * @returns {{ valid: boolean, errors: Array<{ path: string, code: string, message: string }> }}
+ */
+export function validateIssueContract(issueInput, options = {}) {
+  const resolved = getBody(issueInput, 'Issue');
+  const errors = [...resolved.errors];
+  if (errors.length > 0) return { valid: false, errors: sortDiagnostics(errors) };
+
+  const body = resolved.body;
+  if (body.trim() === '') {
+    errors.push(diagnostic(['body'], 'BODY_EMPTY', 'Issue body cannot be empty.'));
+  } else {
+    const required = resolveRequiredSections(options, 'requiredIssueSections', DEFAULT_REQUIRED_ISSUE_SECTIONS);
+    errors.push(...requiredSectionsErrors(body, required).errors);
+  }
+
+  const ordered = sortDiagnostics(errors);
+  return { valid: ordered.length === 0, errors: ordered };
+}
+
+/**
+ * Validate required PR sections and require a real governing Issue reference.
+ * No network lookup is performed; this is syntax/contract validation only.
+ * @param {object|string} prInput
+ * @param {object} [options]
+ * @returns {{ valid: boolean, errors: Array<{ path: string, code: string, message: string }> }}
  */
 export function validatePullRequestContract(prInput, options = {}) {
-  const errors = [];
+  const resolved = getBody(prInput, 'Pull request');
+  const errors = [...resolved.errors];
+  if (errors.length > 0) return { valid: false, errors: sortDiagnostics(errors) };
 
-  let body = '';
-  if (typeof prInput === 'string') {
-    body = prInput;
-  } else if (prInput && typeof prInput === 'object') {
-    if (typeof prInput.body !== 'string') {
-      errors.push({ path: 'body', message: 'Pull request body must be a string.' });
-    } else {
-      body = prInput.body;
-    }
+  const body = resolved.body;
+  if (body.trim() === '') {
+    errors.push(diagnostic(['body'], 'BODY_EMPTY', 'Pull request body cannot be empty.'));
   } else {
-    return {
-      valid: false,
-      errors: [{ path: '$', message: 'Pull request input must be a string or object with a body property.' }],
-    };
-  }
+    const required = resolveRequiredSections(options, 'requiredPRSections', DEFAULT_REQUIRED_PR_SECTIONS);
+    const checked = requiredSectionsErrors(body, required);
+    errors.push(...checked.errors);
 
-  if (typeof body === 'string' && body.trim() === '') {
-    errors.push({ path: 'body', message: 'Pull request body cannot be empty.' });
-  }
-
-  const requiredSections = Array.isArray(options?.requiredPRSections)
-    ? options.requiredPRSections
-    : Array.isArray(options?.config?.requiredPRSections)
-    ? options.config.requiredPRSections
-    : DEFAULT_REQUIRED_PR_SECTIONS;
-
-  if (typeof body === 'string' && body.trim() !== '') {
-    const parsedSections = extractMarkdownSections(body);
-
-    for (const sectionName of requiredSections) {
-      const normalizedKey = sectionName.toLowerCase();
-      if (!parsedSections.has(normalizedKey)) {
-        errors.push({
-          path: `body.sections.${sectionName}`,
-          message: `Missing required section "${sectionName}".`,
-        });
-      } else {
-        const content = parsedSections.get(normalizedKey);
-        if (!content || content.trim() === '') {
-          errors.push({
-            path: `body.sections.${sectionName}`,
-            message: `Required section "${sectionName}" is empty.`,
-          });
-        }
+    if (required.some((name) => name.toLowerCase() === 'governing issue')) {
+      const issueContent = checked.parsed.get('governing issue') || '';
+      if (!ISSUE_REFERENCE_PATTERN.test(issueContent)) {
+        errors.push(diagnostic(
+          ['body', 'sections', 'Governing Issue'],
+          'GOVERNING_ISSUE_REFERENCE_REQUIRED',
+          'Governing Issue must contain a valid Issue number such as #123 or a GitHub Issue URL.'
+        ));
       }
     }
   }
 
-  return {
-    valid: errors.length === 0,
-    errors,
-  };
+  const ordered = sortDiagnostics(errors);
+  return { valid: ordered.length === 0, errors: ordered };
 }

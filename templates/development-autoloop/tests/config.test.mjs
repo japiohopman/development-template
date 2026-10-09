@@ -3,123 +3,127 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { validateConfig } from '../src/config.mjs';
+import {
+  CONFIG_SCHEMA,
+  KNOWN_CONFIG_KEYS,
+  REQUIRED_LABEL_KEYS,
+  SUPPORTED_SCHEMA_VERSION,
+  validateConfig
+} from '../src/config.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const examplePath = join(__dirname, '../config/autoloop.example.json');
+const schemaPath = join(__dirname, '../config/autoloop.schema.v1.json');
 
-test('valid autoloop.example.json config passes validation', () => {
-  const exampleConfigPath = join(__dirname, '../config/autoloop.example.json');
-  const exampleConfigJson = readFileSync(exampleConfigPath, 'utf8');
-  const result = validateConfig(exampleConfigJson);
+function readExample() {
+  return JSON.parse(readFileSync(examplePath, 'utf8'));
+}
 
+test('valid example config passes the versioned schema', () => {
+  const result = validateConfig(readFileSync(examplePath, 'utf8'));
   assert.equal(result.valid, true);
-  assert.equal(result.errors.length, 0);
-  assert.ok(result.config);
-  assert.equal(result.config.schemaVersion, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.config.schemaVersion, SUPPORTED_SCHEMA_VERSION);
 });
 
-test('malformed JSON string returns path-specific error', () => {
+test('canonical schema and example remain in sync', () => {
+  const example = readExample();
+  const schema = JSON.parse(readFileSync(schemaPath, 'utf8'));
+  assert.equal(schema.properties.schemaVersion.const, 1);
+  assert.equal(schema, CONFIG_SCHEMA);
+  assert.deepEqual(Object.keys(example).sort(), Object.keys(schema.properties).sort());
+  assert.deepEqual([...KNOWN_CONFIG_KEYS].sort(), Object.keys(schema.properties).sort());
+  assert.deepEqual(Object.keys(example.labels).sort(), Object.keys(schema.properties.labels.properties).sort());
+  assert.deepEqual(REQUIRED_LABEL_KEYS.sort(), Object.keys(schema.properties.labels.properties).sort());
+  assert.deepEqual(schema.required.slice().sort(), Object.keys(example).sort());
+});
+
+test('malformed JSON returns a stable machine-readable diagnostic', () => {
   const result = validateConfig('{ invalid json ');
   assert.equal(result.valid, false);
   assert.equal(result.config, null);
-  assert.equal(result.errors.length, 1);
-  assert.equal(result.errors[0].path, '$');
-  assert.match(result.errors[0].message, /Malformed JSON input/);
+  assert.deepEqual(result.errors, [
+    { path: '/', code: 'INVALID_JSON', message: 'Input is not valid JSON.' }
+  ]);
 });
 
-test('non-object input returns path-specific error', () => {
+test('non-object root is rejected by schema type validation', () => {
   const result = validateConfig('123');
   assert.equal(result.valid, false);
-  assert.equal(result.errors.length, 1);
-  assert.equal(result.errors[0].path, '$');
-  assert.match(result.errors[0].message, /non-null object/);
+  assert.equal(result.config, null);
+  assert.ok(result.errors.some((error) => error.path === '/' && error.code === 'SCHEMA_TYPE'));
 });
 
-test('unknown top-level config property returns actionable error', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-  const badObj = { ...validObj, unknownProperty: 'foo' };
-  const result = validateConfig(badObj);
+test('unknown top-level keys are rejected with stable codes and ordering', () => {
+  const example = readExample();
+  const first = validateConfig({ ...example, zeta: true, alpha: true });
+  const second = validateConfig({ alpha: true, zeta: true, ...example });
+  assert.deepEqual(first.errors, second.errors);
+  assert.deepEqual(first.errors.map((error) => [error.path, error.code]), [
+    ['/alpha', 'SCHEMA_ADDITIONAL_PROPERTIES'],
+    ['/zeta', 'SCHEMA_ADDITIONAL_PROPERTIES']
+  ]);
+  assert.ok(first.errors.every((error) => Object.keys(error).sort().join(',') === 'code,message,path'));
+});
 
+test('unsupported schema versions are rejected at schemaVersion', () => {
+  const result = validateConfig({ ...readExample(), schemaVersion: 99 });
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'unknownProperty'));
+  assert.ok(result.errors.some((error) => error.path === '/schemaVersion' && error.code === 'SCHEMA_CONST'));
 });
 
-test('unsupported schemaVersion produces path-specific error', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-
-  const badVersion = { ...validObj, schemaVersion: 99 };
-  const result1 = validateConfig(badVersion);
-  assert.equal(result1.valid, false);
-  assert.ok(result1.errors.some(e => e.path === 'schemaVersion' && e.message.includes('Unsupported schemaVersion 99')));
-
-  const missingVersion = { ...validObj };
-  delete missingVersion.schemaVersion;
-  const result2 = validateConfig(missingVersion);
-  assert.equal(result2.valid, false);
-  assert.ok(result2.errors.some(e => e.path === 'schemaVersion'));
-});
-
-test('invalid runMode produces path-specific error', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-  const badMode = { ...validObj, runMode: 'invalid-mode' };
-  const result = validateConfig(badMode);
-
+test('invalid run mode and blank branch name are rejected', () => {
+  const result = validateConfig({ ...readExample(), runMode: 'sometimes', defaultBranch: '   ' });
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'runMode'));
+  assert.ok(result.errors.some((error) => error.path === '/runMode' && error.code === 'SCHEMA_ENUM'));
+  assert.ok(result.errors.some((error) => error.path === '/defaultBranch' && error.code === 'SCHEMA_MIN_LENGTH'));
 });
 
-test('invalid maxConcurrentSessions and staleClaimMinutes produce path-specific errors', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-  const badLimits = { ...validObj, maxConcurrentSessions: 0, staleClaimMinutes: -5 };
-  const result = validateConfig(badLimits);
-
+test('invalid session limits produce deterministic diagnostics', () => {
+  const result = validateConfig({ ...readExample(), maxConcurrentSessions: 0, staleClaimMinutes: -5 });
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'maxConcurrentSessions'));
-  assert.ok(result.errors.some(e => e.path === 'staleClaimMinutes'));
+  assert.ok(result.errors.some((error) => error.path === '/maxConcurrentSessions' && error.code === 'SCHEMA_MINIMUM'));
+  assert.ok(result.errors.some((error) => error.path === '/staleClaimMinutes' && error.code === 'SCHEMA_MINIMUM'));
 });
 
-test('missing or invalid label properties produce path-specific errors', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-  const badLabels = {
-    ...validObj,
-    labels: {
-      ...validObj.labels,
-      proposed: '',
-      extraLabel: 'extra',
-    },
-  };
-  delete badLabels.labels.ready;
-
-  const result = validateConfig(badLabels);
+test('missing, blank, and unknown label fields are rejected', () => {
+  const example = readExample();
+  const labels = { ...example.labels, proposed: '', extraLabel: 'unexpected' };
+  delete labels.ready;
+  const result = validateConfig({ ...example, labels });
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'labels.proposed'));
-  assert.ok(result.errors.some(e => e.path === 'labels.ready'));
-  assert.ok(result.errors.some(e => e.path === 'labels.extraLabel'));
+  assert.ok(result.errors.some((error) => error.path === '/labels/proposed' && error.code === 'SCHEMA_MIN_LENGTH'));
+  assert.ok(result.errors.some((error) => error.path === '/labels/ready' && error.code === 'SCHEMA_REQUIRED'));
+  assert.ok(result.errors.some((error) => error.path === '/labels/extraLabel' && error.code === 'SCHEMA_ADDITIONAL_PROPERTIES'));
 });
 
-test('non-array or empty string elements in list fields produce path-specific errors', () => {
-  const validObj = JSON.parse(
-    readFileSync(join(__dirname, '../config/autoloop.example.json'), 'utf8')
-  );
-  const badLists = {
-    ...validObj,
-    requiredChecks: 'not-an-array',
-    trustedReviewers: ['alice', ''],
-  };
-
-  const result = validateConfig(badLists);
+test('list items and minimum required Issue sections are validated', () => {
+  const example = readExample();
+  const result = validateConfig({
+    ...example,
+    requiredIssueSections: [],
+    requiredChecks: [''],
+    trustedReviewers: ['alice', '']
+  });
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'requiredChecks'));
-  assert.ok(result.errors.some(e => e.path === 'trustedReviewers[1]'));
+  assert.ok(result.errors.some((error) => error.path === '/requiredIssueSections' && error.code === 'SCHEMA_MIN_ITEMS'));
+  assert.ok(result.errors.some((error) => error.path === '/requiredChecks/0' && error.code === 'SCHEMA_MIN_LENGTH'));
+  assert.ok(result.errors.some((error) => error.path === '/trustedReviewers/1' && error.code === 'SCHEMA_MIN_LENGTH'));
+});
+
+test('sequenceSource accepts null or a non-empty string only', () => {
+  assert.equal(validateConfig({ ...readExample(), sequenceSource: null }).valid, true);
+  assert.equal(validateConfig({ ...readExample(), sequenceSource: 'docs/roadmap.md' }).valid, true);
+  const invalid = validateConfig({ ...readExample(), sequenceSource: '' });
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.errors.some((error) => error.path === '/sequenceSource' && error.code === 'SCHEMA_MIN_LENGTH'));
+});
+
+test('example keeps all automation safety defaults disabled', () => {
+  const example = readExample();
+  assert.equal(example.enabled, false);
+  assert.equal(example.runMode, 'dry-run');
+  assert.equal(example.automaticMerge, false);
+  assert.equal(example.scheduleEnabled, false);
 });

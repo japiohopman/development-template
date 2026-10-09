@@ -6,149 +6,165 @@ import { dirname, join } from 'node:path';
 import {
   validateIssueContract,
   validatePullRequestContract,
-  extractMarkdownSections,
+  extractMarkdownSections
 } from '../src/contracts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-test('extractMarkdownSections extracts hash headings and bold headings correctly', () => {
-  const md = `
-# Scope
-This is the scope.
+const validIssueBody = [
+  '## Scope',
+  'Implement contract validation.',
+  '',
+  '## Acceptance criteria',
+  '- Schema is validated.',
+  '',
+  '## Dependencies',
+  'None',
+  '',
+  '## Out of scope',
+  'Live dispatch.',
+  '',
+  '## Validation plan',
+  'npm test'
+].join('\n');
 
-## Acceptance criteria
-1. Criterion A
-2. Criterion B
+const completePrBody = [
+  '## Governing Issue',
+  'Closes #123',
+  '',
+  '## Summary',
+  'Adds schema-backed configuration validation.',
+  '',
+  '## Scope boundary',
+  'Validation only; no live dispatch.',
+  '',
+  '## Acceptance criteria evidence',
+  'Schema validation and contract checks are covered by tests.',
+  '',
+  '## Verification',
+  'All tests pass on the exact head SHA.',
+  '',
+  '## Risks and blockers',
+  'No known blockers.',
+  '',
+  '## Handoff',
+  'Human review remains required.'
+].join('\n');
 
-**Dependencies**
-None
-
-**Out of scope**
-Other features
-
-### Validation plan
-Run unit tests
-`;
-
-  const sections = extractMarkdownSections(md);
+test('extractMarkdownSections handles hash and bold headings', () => {
+  const markdown = [
+    '# Scope',
+    'This is the scope.',
+    '',
+    '## Acceptance criteria',
+    'Criterion A',
+    'Criterion B',
+    '',
+    '**Dependencies**',
+    'None',
+    '',
+    '**Out of scope**',
+    'Other features',
+    '',
+    '### Validation plan',
+    'Run unit tests'
+  ].join('\n');
+  const sections = extractMarkdownSections(markdown);
   assert.equal(sections.get('scope'), 'This is the scope.');
-  assert.equal(sections.get('acceptance criteria'), '1. Criterion A\n2. Criterion B');
+  assert.equal(sections.get('acceptance criteria'), 'Criterion A\nCriterion B');
   assert.equal(sections.get('dependencies'), 'None');
   assert.equal(sections.get('out of scope'), 'Other features');
   assert.equal(sections.get('validation plan'), 'Run unit tests');
 });
 
-test('valid issue body passes validation', () => {
-  const validIssueBody = `
-## Scope
-Implement contract validation.
-
-## Acceptance criteria
-- [x] Schema is validated.
-
-## Dependencies
-None
-
-## Out of scope
-Live dispatch.
-
-## Validation plan
-npm test
-`;
-
+test('complete Issue body passes validation', () => {
   const result = validateIssueContract(validIssueBody);
   assert.equal(result.valid, true);
-  assert.equal(result.errors.length, 0);
+  assert.deepEqual(result.errors, []);
 });
 
-test('issue missing required section fails with section path', () => {
-  const incompleteIssueBody = `
-## Scope
-Implement contract validation.
-
-## Acceptance criteria
-- [x] Schema is validated.
-
-## Dependencies
-None
-
-## Validation plan
-npm test
-`;
-
-  const result = validateIssueContract(incompleteIssueBody);
+test('Issue missing a required section returns a stable pointer diagnostic', () => {
+  const body = [
+    '## Scope', 'Implement it.',
+    '## Acceptance criteria', 'Test it.',
+    '## Dependencies', 'None',
+    '## Validation plan', 'npm test'
+  ].join('\n');
+  const result = validateIssueContract(body);
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Out of scope'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Out of scope' && error.code === 'REQUIRED_SECTION_MISSING'));
 });
 
-test('issue with empty required section fails', () => {
-  const emptySectionBody = `
-## Scope
-Implement contract validation.
-
-## Acceptance criteria
-
-## Dependencies
-None
-
-## Out of scope
-Live dispatch.
-
-## Validation plan
-npm test
-`;
-
-  const result = validateIssueContract(emptySectionBody);
+test('empty required Issue section fails', () => {
+  const body = [
+    '## Scope', 'Implement it.',
+    '## Acceptance criteria', '',
+    '## Dependencies', 'None',
+    '## Out of scope', 'Live dispatch.',
+    '## Validation plan', 'npm test'
+  ].join('\n');
+  const result = validateIssueContract(body);
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Acceptance criteria'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Acceptance criteria' && error.code === 'REQUIRED_SECTION_EMPTY'));
 });
 
-test('custom requiredIssueSections override works', () => {
-  const customBody = `
-## Summary
-Short summary.
-
-## Test plan
-Run tests.
-`;
-
-  const options = { requiredIssueSections: ['Summary', 'Test plan'] };
-  const result = validateIssueContract(customBody, options);
+test('custom required Issue sections override works', () => {
+  const body = ['## Summary', 'Short summary.', '## Test plan', 'Run tests.'].join('\n');
+  const result = validateIssueContract(body, { requiredIssueSections: ['Summary', 'Test plan'] });
   assert.equal(result.valid, true);
 });
 
-test('pull request template body passes PR contract validation', () => {
-  const prTemplatePath = join(__dirname, '../.github/pull_request_template.md');
-  const prTemplateBody = readFileSync(prTemplatePath, 'utf8');
-
-  const result = validatePullRequestContract(prTemplateBody);
+test('completed PR fixture with a real governing Issue reference passes', () => {
+  const result = validatePullRequestContract(completePrBody);
   assert.equal(result.valid, true);
-  assert.equal(result.errors.length, 0);
+  assert.deepEqual(result.errors, []);
 });
 
-test('pull request missing required sections fails with detailed errors', () => {
-  const badPRBody = `
-## Governing Issue
-Closes #12
-
-## Summary
-Done.
-`;
-
-  const result = validatePullRequestContract(badPRBody);
+test('the untouched PR template placeholder is not a valid completed PR contract', () => {
+  const templatePath = join(__dirname, '../.github/pull_request_template.md');
+  const templateBody = readFileSync(templatePath, 'utf8');
+  const result = validatePullRequestContract(templateBody);
   assert.equal(result.valid, false);
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Scope boundary'));
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Acceptance criteria evidence'));
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Verification'));
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Risks and blockers'));
-  assert.ok(result.errors.some(e => e.path === 'body.sections.Handoff'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Governing Issue' && error.code === 'GOVERNING_ISSUE_REFERENCE_REQUIRED'));
 });
 
-test('validation functions are pure and execute read-only without mutations or dispatches', () => {
-  const issueInput = { body: '## Scope\nTest\n## Acceptance criteria\nTest\n## Dependencies\nNone\n## Out of scope\nNone\n## Validation plan\nTest' };
-  const frozenInput = Object.freeze({ ...issueInput });
+test('a valid GitHub Issue URL is accepted in the governing Issue section', () => {
+  const body = completePrBody.replace('Closes #123', 'https://github.com/example/project/issues/123');
+  assert.equal(validatePullRequestContract(body).valid, true);
+});
 
-  const result = validateIssueContract(frozenInput);
+test('missing PR contract sections fail with precise paths', () => {
+  const result = validatePullRequestContract(['## Governing Issue', 'Closes #12', '## Summary', 'Done.'].join('\n'));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Scope boundary'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Acceptance criteria evidence'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Verification'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Risks and blockers'));
+  assert.ok(result.errors.some((error) => error.path === '/body/sections/Handoff'));
+});
+
+test('contract diagnostic shape and order are stable', () => {
+  const result = validatePullRequestContract(['## Summary', 'Done.'].join('\n'));
+  assert.deepEqual(result.errors, result.errors.slice().sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 :
+    a.code < b.code ? -1 : a.code > b.code ? 1 :
+    a.message < b.message ? -1 : a.message > b.message ? 1 : 0
+  ));
+  assert.ok(result.errors.every((error) => Object.keys(error).sort().join(',') === 'code,message,path'));
+});
+
+test('contract validators reject invalid inputs with stable diagnostics', () => {
+  assert.deepEqual(validateIssueContract(null).errors, [{
+    path: '/',
+    code: 'INVALID_CONTRACT_INPUT',
+    message: 'Issue input must be a string or an object with a body property.'
+  }]);
+});
+
+test('validators remain pure and read-only', () => {
+  const input = Object.freeze({ body: validIssueBody });
+  const result = validateIssueContract(input);
   assert.equal(result.valid, true);
+  assert.equal(input.body, validIssueBody);
 });
