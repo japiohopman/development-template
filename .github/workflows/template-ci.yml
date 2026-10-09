@@ -1,0 +1,35 @@
+name: Template validation
+
+on:
+  push:
+    paths:
+      - "templates/development-autoloop/**"
+      - "docs/TEMPLATE_STANDARDS.md"
+      - ".github/workflows/template-ci.yml"
+      - "README.md"
+  pull_request:
+    paths:
+      - "templates/development-autoloop/**"
+      - "docs/TEMPLATE_STANDARDS.md"
+      - ".github/workflows/template-ci.yml"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  autoloop-foundation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: templates/development-autoloop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Syntax checks
+        run: npm run check
+      - name: Unit tests
+        run: npm test
