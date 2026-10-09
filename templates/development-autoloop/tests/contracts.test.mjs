@@ -134,6 +134,18 @@ test('a valid GitHub Issue URL is accepted in the governing Issue section', () =
   assert.equal(validatePullRequestContract(body).valid, true);
 });
 
+test('custom PR section settings cannot bypass governing Issue validation', () => {
+  const result = validatePullRequestContract(
+    ['## Summary', 'Only a summary.'].join('\\n'),
+    { requiredPRSections: ['Summary'] }
+  );
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) =>
+    error.path === '/body/sections/Governing Issue' &&
+    error.code === 'REQUIRED_SECTION_MISSING'
+  ));
+});
+
 test('missing PR contract sections fail with precise paths', () => {
   const result = validatePullRequestContract(['## Governing Issue', 'Closes #12', '## Summary', 'Done.'].join('\n'));
   assert.equal(result.valid, false);

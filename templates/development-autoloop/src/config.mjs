@@ -181,7 +181,7 @@ export function validateConfig(rawInput) {
   // the validator silently ignores.
   const inspectKeywords = (node, path) => {
     for (const key of Object.keys(node)) {
-      if (key.startsWith('$') || key === 'title' || key === 'description') continue;
+      if (key === '$schema' || key === '$id' || key === 'title' || key === 'description') continue;
       if (!SUPPORTED_SCHEMA_KEYWORDS.has(key)) {
         pushDiagnostic(errors, path, 'UNSUPPORTED_SCHEMA_KEYWORD', 'Schema keyword "' + key + '" is not supported by this validator.');
       }

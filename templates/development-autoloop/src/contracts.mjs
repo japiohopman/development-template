@@ -168,7 +168,11 @@ export function validatePullRequestContract(prInput, options = {}) {
   if (body.trim() === '') {
     errors.push(diagnostic(['body'], 'BODY_EMPTY', 'Pull request body cannot be empty.'));
   } else {
-    const required = resolveRequiredSections(options, 'requiredPRSections', DEFAULT_REQUIRED_PR_SECTIONS);
+    const configuredRequired = resolveRequiredSections(options, 'requiredPRSections', DEFAULT_REQUIRED_PR_SECTIONS);
+    // A caller may customize the required sections, but cannot disable governing-Issue linkage.
+    const required = configuredRequired.some((name) => name.toLowerCase() === 'governing issue')
+      ? configuredRequired
+      : [...configuredRequired, 'Governing Issue'];
     const checked = requiredSectionsErrors(body, required);
     errors.push(...checked.errors);
 
