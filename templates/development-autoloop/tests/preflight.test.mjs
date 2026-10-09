@@ -201,3 +201,23 @@ test('invalid or missing target repository URL is rejected', async () => {
     /repositoryUrl must be an HTTPS URL/,
   );
 });
+
+test('PR URL on a different Git host blocks even when owner and repository path match', async () => {
+  let fetchCalled = false;
+  const blockers = await reconcileSessions([{
+    name: 'sessions/8',
+    state: 'IN_PROGRESS',
+    sourceContext: { source: 'source-a' },
+    outputs: [{ pullRequest: { url: 'https://git.example.com/example/project/pull/12' } }],
+  }], {
+    sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
+    fetchPullRequest: async () => {
+      fetchCalled = true;
+      return { state: 'closed', merged: true };
+    },
+  });
+  assert.equal(fetchCalled, false);
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0].reason, /does not belong/);
+});
