@@ -50,6 +50,52 @@ export function findSessionPullRequest(session) {
   return outputs.find(output => output?.pullRequest?.url)?.pullRequest ?? null;
 }
 
+function parseRepositoryUrl(repositoryUrl) {
+  let parsed;
+  try {
+    parsed = new URL(repositoryUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+
+  let segments;
+  try {
+    segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return null;
+  }
+  if (segments.length !== 2 || segments.some(segment => !segment)) return null;
+
+  return {
+    origin: parsed.origin.toLowerCase(),
+    owner: segments[0].toLowerCase(),
+    repository: segments[1].toLowerCase(),
+  };
+}
+
+function pullRequestUrlMatchesRepository(pullRequestUrl, expectedRepository) {
+  let parsed;
+  try {
+    parsed = new URL(pullRequestUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:' || parsed.origin.toLowerCase() !== expectedRepository.origin) return false;
+
+  let segments;
+  try {
+    segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return false;
+  }
+  return segments.length >= 4
+    && segments[0].toLowerCase() === expectedRepository.owner
+    && segments[1].toLowerCase() === expectedRepository.repository
+    && segments[2].toLowerCase() === 'pull'
+    && /^\d+$/.test(segments[3]);
+}
+
 /**
  * Reconcile provider sessions against their associated PRs.
  * fetchPullRequest must throw on an API failure; callers must not treat a
@@ -57,12 +103,18 @@ export function findSessionPullRequest(session) {
  */
 export async function reconcileSessions(sessions, {
   sourceName,
+  repositoryUrl,
   fetchPullRequest,
   activeStates = DEFAULT_ACTIVE_SESSION_STATES,
   terminalStates = DEFAULT_TERMINAL_SESSION_STATES,
 } = {}) {
   if (!Array.isArray(sessions)) throw new TypeError('sessions must be an array');
   if (typeof fetchPullRequest !== 'function') throw new TypeError('fetchPullRequest must be a function');
+
+  const expectedRepository = parseRepositoryUrl(repositoryUrl);
+  if (!expectedRepository) {
+    throw new TypeError('repositoryUrl must be an HTTPS URL for exactly one repository (owner/repo).');
+  }
 
   const blockers = [];
   for (const session of sessions) {
@@ -72,7 +124,28 @@ export async function reconcileSessions(sessions, {
     const sourceUnknown = !sessionSource;
     const disposition = sessionDisposition(session, { activeStates, terminalStates });
     const prRef = findSessionPullRequest(session);
-    const prNumber = extractPullRequestNumber(prRef?.url);
+    let prNumber = null;
+    if (prRef?.url) {
+      if (!pullRequestUrlMatchesRepository(prRef.url, expectedRepository)) {
+        blockers.push({
+          session: session?.name ?? 'unknown',
+          state: disposition.state,
+          pullRequest: extractPullRequestNumber(prRef.url),
+          reason: 'Associated PR URL is malformed or does not belong to the configured target repository; session remains unresolved.',
+        });
+        continue;
+      }
+      prNumber = extractPullRequestNumber(prRef.url);
+      if (prNumber === null) {
+        blockers.push({
+          session: session?.name ?? 'unknown',
+          state: disposition.state,
+          pullRequest: null,
+          reason: 'Associated PR URL has no valid pull request number; session remains unresolved.',
+        });
+        continue;
+      }
+    }
 
     if (prNumber !== null) {
       const pullRequest = await fetchPullRequest(prNumber);

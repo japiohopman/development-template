@@ -43,6 +43,7 @@ test('a verified merged PR clears a stale historical session', async () => {
     outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/12' } }],
   }], {
     sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
     fetchPullRequest: async number => {
       assert.equal(number, 12);
       return { state: 'closed', merged: true };
@@ -54,6 +55,7 @@ test('a verified merged PR clears a stale historical session', async () => {
 test('missing source metadata blocks instead of assuming another repository', async () => {
   const blockers = await reconcileSessions([{ name: 'sessions/2', state: 'COMPLETED' }], {
     sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
     fetchPullRequest: async () => null,
   });
   assert.equal(blockers.length, 1);
@@ -68,6 +70,7 @@ test('closed but unmerged PR remains unresolved', async () => {
     outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/13' } }],
   }], {
     sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
     fetchPullRequest: async () => ({ state: 'closed', merged: false }),
   });
   assert.equal(blockers.length, 1);
@@ -81,6 +84,7 @@ test('provider API lookup errors propagate and block the caller', async () => {
     outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/14' } }],
   }], {
     sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
     fetchPullRequest: async () => { throw new Error('GitHub API unavailable'); },
   }), /GitHub API unavailable/);
 });
@@ -143,8 +147,57 @@ test('missing source metadata remains a blocker even when the linked PR is merge
     outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/15' } }],
   }], {
     sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
     fetchPullRequest: async () => ({ state: 'closed', merged: true }),
   });
   assert.equal(blockers.length, 1);
   assert.match(blockers[0].reason, /source metadata is missing/);
+});
+
+test('foreign-repository PR URL with a colliding number blocks reconciliation', async () => {
+  let fetchCalled = false;
+  const blockers = await reconcileSessions([{
+    name: 'sessions/6',
+    state: 'IN_PROGRESS',
+    sourceContext: { source: 'source-a' },
+    outputs: [{ pullRequest: { url: 'https://github.com/other-owner/other-project/pull/12' } }],
+  }], {
+    sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
+    fetchPullRequest: async () => {
+      fetchCalled = true;
+      return { state: 'closed', merged: true };
+    },
+  });
+  assert.equal(fetchCalled, false);
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0].pullRequest, 12);
+  assert.match(blockers[0].reason, /does not belong/);
+});
+
+test('malformed PR URL blocks reconciliation instead of using its number', async () => {
+  let fetchCalled = false;
+  const blockers = await reconcileSessions([{
+    name: 'sessions/7',
+    state: 'IN_PROGRESS',
+    sourceContext: { source: 'source-a' },
+    outputs: [{ pullRequest: { url: 'javascript:alert(1)/pull/12' } }],
+  }], {
+    sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
+    fetchPullRequest: async () => {
+      fetchCalled = true;
+      return { state: 'closed', merged: true };
+    },
+  });
+  assert.equal(fetchCalled, false);
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0].reason, /malformed/);
+});
+
+test('invalid or missing target repository URL is rejected', async () => {
+  await assert.rejects(
+    () => reconcileSessions([], { sourceName: 'source-a', fetchPullRequest: async () => null }),
+    /repositoryUrl must be an HTTPS URL/,
+  );
 });
