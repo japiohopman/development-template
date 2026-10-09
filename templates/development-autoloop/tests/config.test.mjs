@@ -31,11 +31,11 @@ test('canonical schema and example remain in sync', () => {
   const example = readExample();
   const schema = JSON.parse(readFileSync(schemaPath, 'utf8'));
   assert.equal(schema.properties.schemaVersion.const, 1);
-  assert.equal(schema, CONFIG_SCHEMA);
+  assert.deepEqual(schema, CONFIG_SCHEMA);
   assert.deepEqual(Object.keys(example).sort(), Object.keys(schema.properties).sort());
   assert.deepEqual([...KNOWN_CONFIG_KEYS].sort(), Object.keys(schema.properties).sort());
   assert.deepEqual(Object.keys(example.labels).sort(), Object.keys(schema.properties.labels.properties).sort());
-  assert.deepEqual(REQUIRED_LABEL_KEYS.sort(), Object.keys(schema.properties.labels.properties).sort());
+  assert.deepEqual(REQUIRED_LABEL_KEYS.slice().sort(), Object.keys(schema.properties.labels.properties).sort());
   assert.deepEqual(schema.required.slice().sort(), Object.keys(example).sort());
 });
 
