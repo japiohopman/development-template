@@ -25,18 +25,56 @@
     "sequenceSource"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
-    "enabled": { "type": "boolean" },
-    "defaultBranch": { "type": "string", "minLength": 1 },
-    "runMode": { "type": "string", "enum": ["dry-run", "live"] },
-    "workProvider": { "type": "string", "minLength": 1 },
-    "reviewProvider": { "type": "string", "minLength": 1 },
-    "maxConcurrentSessions": { "type": "integer", "minimum": 1 },
-    "humanReadinessRequired": { "type": "boolean" },
-    "automaticMerge": { "type": "boolean" },
-    "scheduleEnabled": { "type": "boolean" },
-    "requiredConfirmation": { "type": "string", "minLength": 1 },
-    "staleClaimMinutes": { "type": "integer", "minimum": 1 },
+    "schemaVersion": {
+      "const": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "defaultBranch": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "runMode": {
+      "type": "string",
+      "enum": [
+        "dry-run",
+        "live"
+      ]
+    },
+    "workProvider": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "reviewProvider": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "maxConcurrentSessions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "humanReadinessRequired": {
+      "type": "boolean"
+    },
+    "automaticMerge": {
+      "type": "boolean"
+    },
+    "scheduleEnabled": {
+      "type": "boolean"
+    },
+    "requiredConfirmation": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "staleClaimMinutes": {
+      "type": "integer",
+      "minimum": 1
+    },
     "labels": {
       "type": "object",
       "additionalProperties": false,
@@ -52,33 +90,85 @@
         "escalated"
       ],
       "properties": {
-        "proposed": { "type": "string", "minLength": 1 },
-        "ready": { "type": "string", "minLength": 1 },
-        "claimed": { "type": "string", "minLength": 1 },
-        "inProgress": { "type": "string", "minLength": 1 },
-        "awaitingReview": { "type": "string", "minLength": 1 },
-        "changesRequested": { "type": "string", "minLength": 1 },
-        "approved": { "type": "string", "minLength": 1 },
-        "blocked": { "type": "string", "minLength": 1 },
-        "escalated": { "type": "string", "minLength": 1 }
+        "proposed": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "ready": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "claimed": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "inProgress": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "awaitingReview": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "changesRequested": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "approved": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "blocked": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "escalated": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
       }
     },
     "requiredIssueSections": {
       "type": "array",
       "minItems": 1,
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
     },
     "requiredChecks": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
     },
     "trustedReviewers": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
     },
     "sequenceSource": {
-      "type": ["string", "null"],
-      "minLength": 1
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "pattern": "\\S"
     }
   }
 }

@@ -26,6 +26,7 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
   'properties',
   'items',
   'minLength',
+  'pattern',
   'minItems',
   'minimum'
 ]);
@@ -102,6 +103,11 @@ function validateSchemaNode(schema, value, path, errors, provided = true) {
   if (typeof value === 'string' && Number.isInteger(schema.minLength) &&
       Array.from(value).length < schema.minLength) {
     pushDiagnostic(errors, path, 'SCHEMA_MIN_LENGTH', 'String must contain at least ' + schema.minLength + ' character(s).');
+  }
+
+  if (typeof value === 'string' && typeof schema.pattern === 'string' &&
+      !new RegExp(schema.pattern).test(value)) {
+    pushDiagnostic(errors, path, 'SCHEMA_PATTERN', 'String does not match the required pattern.');
   }
 
   if (typeof value === 'number' && typeof schema.minimum === 'number' && value < schema.minimum) {

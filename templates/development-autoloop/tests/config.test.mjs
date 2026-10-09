@@ -74,10 +74,12 @@ test('unsupported schema versions are rejected at schemaVersion', () => {
 });
 
 test('invalid run mode and blank branch name are rejected', () => {
-  const result = validateConfig({ ...readExample(), runMode: 'sometimes', defaultBranch: '   ' });
+  const result = validateConfig({ ...readExample(), runMode: 'sometimes', defaultBranch: '' });
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) => error.path === '/runMode' && error.code === 'SCHEMA_ENUM'));
   assert.ok(result.errors.some((error) => error.path === '/defaultBranch' && error.code === 'SCHEMA_MIN_LENGTH'));
+  const whitespace = validateConfig({ ...readExample(), defaultBranch: '   ' });
+  assert.ok(whitespace.errors.some((error) => error.path === '/defaultBranch' && error.code === 'SCHEMA_PATTERN'));
 });
 
 test('invalid session limits produce deterministic diagnostics', () => {
