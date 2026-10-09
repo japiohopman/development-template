@@ -135,10 +135,9 @@ test('a valid GitHub Issue URL is accepted in the governing Issue section', () =
 });
 
 test('custom PR section settings cannot bypass governing Issue validation', () => {
-  const result = validatePullRequestContract(
-    ['## Summary', 'Only a summary.'].join('\\n'),
-    { requiredPRSections: ['Summary'] }
-  );
+  const body = ['## Summary', 'Only a summary.'].join('\n');
+  assert.equal(extractMarkdownSections(body).get('summary'), 'Only a summary.');
+  const result = validatePullRequestContract(body, { requiredPRSections: ['Summary'] });
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((error) =>
     error.path === '/body/sections/Governing Issue' &&
