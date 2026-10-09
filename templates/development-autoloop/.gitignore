@@ -1,0 +1,7 @@
+node_modules/
+coverage/
+.env
+.env.*
+!.env.example
+config/autoloop.json
+.DS_Store
