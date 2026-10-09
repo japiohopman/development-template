@@ -85,7 +85,18 @@ export async function reconcileSessions(sessions, {
         });
         continue;
       }
-      if (isMergedPullRequest(pullRequest)) continue;
+      if (isMergedPullRequest(pullRequest)) {
+        if (sourceUnknown) {
+          blockers.push({
+            session: session?.name ?? 'unknown',
+            state: disposition.state,
+            pullRequest: prNumber,
+            reason: 'The PR is merged, but session source metadata is missing; repository ownership cannot be verified safely.',
+          });
+          continue;
+        }
+        continue;
+      }
 
       const prState = String(pullRequest.state ?? '').toLowerCase();
       if (isOpenPullRequest(pullRequest) || prState === 'closed') {

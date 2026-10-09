@@ -1,0 +1,32 @@
+name: Propose a reusable template
+description: Propose a repeatable development workflow or project scaffold for this catalog
+title: "[Template]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Repeatable problem
+      description: What problem should this template solve across multiple projects?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: What should the template include, and what is explicitly excluded?
+    validations:
+      required: true
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Project-specific configuration
+      description: Which settings vary by consumer and must not be hard-coded?
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and recovery
+      description: Permissions, failure behavior, tests, and recovery cases that must be covered.
+    validations:
+      required: true

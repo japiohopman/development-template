@@ -135,3 +135,16 @@ test('exact confirmation is required to authorize dispatch', () => {
   assert.equal(evaluatePreflight({ ...inputs, confirmation: 'dispatch' }).dispatchAuthorized, false);
   assert.equal(evaluatePreflight({ ...inputs, confirmation: 'DISPATCH' }).dispatchAuthorized, true);
 });
+
+test('missing source metadata remains a blocker even when the linked PR is merged', async () => {
+  const blockers = await reconcileSessions([{
+    name: 'sessions/5',
+    state: 'IN_PROGRESS',
+    outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/15' } }],
+  }], {
+    sourceName: 'source-a',
+    fetchPullRequest: async () => ({ state: 'closed', merged: true }),
+  });
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0].reason, /source metadata is missing/);
+});
