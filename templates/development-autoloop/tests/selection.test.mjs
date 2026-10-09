@@ -5,8 +5,7 @@ import {
   selectCandidateIssue,
   extractDependencyIssueNumbers,
   evaluateHumanReadiness,
-  evaluateDependencyState,
-  orderCandidates
+  evaluateDependencyState
 } from '../src/selection.mjs';
 
 const VALID_CONFIG = JSON.parse(
@@ -61,13 +60,21 @@ test('selects candidate deterministically on identical snapshots', () => {
   assert.deepEqual(run1, run2);
 });
 
-test('returns BLOCK_INCOMPLETE_SNAPSHOT when snapshot is incomplete or unverified', () => {
+test('returns BLOCK_INCOMPLETE_SNAPSHOT when snapshot is incomplete or missing collections', () => {
   const incompleteSnapshot = makeSnapshot({ snapshotComplete: false });
-  const result = selectCandidateIssue(incompleteSnapshot, VALID_CONFIG);
+  assert.equal(selectCandidateIssue(incompleteSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
 
-  assert.equal(result.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
-  assert.equal(result.selectedCandidate, null);
-  assert.equal(result.safeToDispatch, false);
+  const missingIssues = { snapshotComplete: true, pullRequests: [], sessions: [], claims: [] };
+  assert.equal(selectCandidateIssue(missingIssues, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+
+  const missingPRs = { snapshotComplete: true, issues: [makeValidIssue()], sessions: [], claims: [] };
+  assert.equal(selectCandidateIssue(missingPRs, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+
+  const missingSessions = { snapshotComplete: true, issues: [makeValidIssue()], pullRequests: [], claims: [] };
+  assert.equal(selectCandidateIssue(missingSessions, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+
+  const missingClaims = { snapshotComplete: true, issues: [makeValidIssue()], pullRequests: [], sessions: [] };
+  assert.equal(selectCandidateIssue(missingClaims, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
 });
 
 test('returns BLOCK_INVALID_CONFIG on invalid configuration', () => {
@@ -191,60 +198,126 @@ test('blocks selection if candidate has unsatisfied or missing dependencies', ()
   assert.equal(res2.decisionCode, 'BLOCK_DEPENDENCY_UNSATISFIED');
 });
 
-test('blocks candidate represented by an open PR, active claim, or active session', () => {
+test('blocks candidate represented by an open PR or closed-unmerged PR, but accepts verified merged PR', () => {
   const candidate = makeValidIssue({ number: 10 });
 
-  const snapshotWithPR = makeSnapshot({
+  const snapshotOpenPR = makeSnapshot({
     issues: [candidate],
     pullRequests: [{ number: 50, state: 'open', issue_number: 10 }]
   });
-  const resPR = selectCandidateIssue(snapshotWithPR, VALID_CONFIG);
-  assert.equal(resPR.decisionCode, 'WAIT_OPEN_PR');
+  assert.equal(selectCandidateIssue(snapshotOpenPR, VALID_CONFIG).decisionCode, 'WAIT_OPEN_PR');
+
+  const snapshotClosedUnmergedPR = makeSnapshot({
+    issues: [candidate],
+    pullRequests: [{ number: 50, state: 'closed', merged: false, issue_number: 10 }]
+  });
+  assert.equal(selectCandidateIssue(snapshotClosedUnmergedPR, VALID_CONFIG).decisionCode, 'WAIT_OPEN_PR');
+
+  const snapshotMergedPR = makeSnapshot({
+    issues: [candidate],
+    pullRequests: [{ number: 50, state: 'closed', merged: true, merged_at: '2025-01-01T00:00:00Z', issue_number: 10 }]
+  });
+  assert.equal(selectCandidateIssue(snapshotMergedPR, VALID_CONFIG).decisionCode, 'CANDIDATE_SELECTED');
+});
+
+test('blocks candidate represented by active claim or active session', () => {
+  const candidate = makeValidIssue({ number: 10 });
 
   const snapshotWithClaim = makeSnapshot({
     issues: [candidate],
     claims: [{ claimId: 'c-123', issueNumber: 10, reconciled: false }]
   });
-  const resClaim = selectCandidateIssue(snapshotWithClaim, VALID_CONFIG);
-  assert.equal(resClaim.decisionCode, 'BLOCK_ACTIVE_CLAIM');
+  assert.equal(selectCandidateIssue(snapshotWithClaim, VALID_CONFIG).decisionCode, 'BLOCK_ACTIVE_CLAIM');
 
   const snapshotWithSession = makeSnapshot({
     issues: [candidate],
     sessions: [{ name: 'sess-1', issueNumber: 10, state: 'IN_PROGRESS' }]
   });
-  const resSession = selectCandidateIssue(snapshotWithSession, VALID_CONFIG);
-  assert.equal(resSession.decisionCode, 'BLOCK_ACTIVE_SESSION');
+  assert.equal(selectCandidateIssue(snapshotWithSession, VALID_CONFIG).decisionCode, 'BLOCK_ACTIVE_SESSION');
 });
 
-test('supports optional sequenceSource ordering and fallback ascending issue number tie breaker', () => {
+test('sequenceSource ordering and ambiguous sequence error cases', () => {
   const issueA = makeValidIssue({ number: 30, title: 'Issue 30' });
   const issueB = makeValidIssue({ number: 10, title: 'Issue 10' });
-  const issueC = makeValidIssue({ number: 20, title: 'Issue 20' });
-
-  const snapshot = makeSnapshot({
-    issues: [issueA, issueB, issueC],
-    sequence: [20, 30, 10]
-  });
 
   const sequencedConfig = { ...VALID_CONFIG, sequenceSource: 'docs/sequence.md' };
-  const resSequenced = selectCandidateIssue(snapshot, sequencedConfig);
-  assert.equal(resSequenced.decisionCode, 'CANDIDATE_SELECTED');
-  assert.equal(resSequenced.selectedCandidate.number, 20);
 
-  const defaultOrderRes = selectCandidateIssue(snapshot, VALID_CONFIG);
-  assert.equal(defaultOrderRes.decisionCode, 'CANDIDATE_SELECTED');
-  assert.equal(defaultOrderRes.selectedCandidate.number, 10);
+  const validSnapshot = makeSnapshot({
+    issues: [issueA, issueB],
+    sequence: [30, 10]
+  });
+  const resValid = selectCandidateIssue(validSnapshot, sequencedConfig);
+  assert.equal(resValid.decisionCode, 'CANDIDATE_SELECTED');
+  assert.equal(resValid.selectedCandidate.number, 30);
+
+  const multipleNoSeqRes = selectCandidateIssue(makeSnapshot({ issues: [issueA, issueB] }), VALID_CONFIG);
+  assert.equal(multipleNoSeqRes.decisionCode, 'BLOCK_AMBIGUOUS_CHOICE');
+
+  const duplicateSeqRes = selectCandidateIssue(
+    makeSnapshot({ issues: [issueA, issueB], sequence: [30, 30] }),
+    sequencedConfig
+  );
+  assert.equal(duplicateSeqRes.decisionCode, 'BLOCK_AMBIGUOUS_CHOICE');
+
+  const incompleteSeqRes = selectCandidateIssue(
+    makeSnapshot({ issues: [issueA, issueB], sequence: [30] }),
+    sequencedConfig
+  );
+  assert.equal(incompleteSeqRes.decisionCode, 'BLOCK_AMBIGUOUS_CHOICE');
 });
 
-test('selection function is dry-run pure and produces stable decision output', () => {
-  const snapshot = Object.freeze(makeSnapshot());
-  const config = Object.freeze({ ...VALID_CONFIG });
+test('fails closed on malformed issue records', () => {
+  const nonObjectIssueSnapshot = makeSnapshot({
+    issues: ['not-an-object']
+  });
+  assert.equal(selectCandidateIssue(nonObjectIssueSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
 
-  const result = selectCandidateIssue(snapshot, config);
-  assert.equal(result.decisionCode, 'CANDIDATE_SELECTED');
-  assert.equal(result.safeToDispatch, false);
-  assert.ok(typeof result.reason === 'string');
-  assert.ok(typeof result.nextAction === 'string');
-  assert.ok(Array.isArray(result.blockers));
-  assert.ok(Array.isArray(result.evaluatedCandidates));
+  const missingNumberSnapshot = makeSnapshot({
+    issues: [{ title: 'No Number', state: 'open', labels: ['roadmap-ready'] }]
+  });
+  assert.equal(selectCandidateIssue(missingNumberSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+
+  const unknownStateSnapshot = makeSnapshot({
+    issues: [{ number: 99, title: 'Unknown state', state: 'invalid-state', labels: ['roadmap-ready'] }]
+  });
+  assert.equal(selectCandidateIssue(unknownStateSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+});
+
+test('permutation invariance: shuffling collection elements produces byte-for-byte identical output', () => {
+  const issueA = makeValidIssue({ number: 10, title: 'Issue 10' });
+  const issueB = makeValidIssue({ number: 20, title: 'Issue 20' });
+  const pr1 = { number: 100, state: 'closed', merged: true, issue_number: 5 };
+  const pr2 = { number: 101, state: 'closed', merged: true, issue_number: 6 };
+  const claim1 = { claimId: 'c-1', issueNumber: 5, reconciled: true };
+  const claim2 = { claimId: 'c-2', issueNumber: 6, reconciled: true };
+  const session1 = { name: 's-1', issueNumber: 5, state: 'COMPLETED' };
+  const session2 = { name: 's-2', issueNumber: 6, state: 'COMPLETED' };
+
+  const sequencedConfig = { ...VALID_CONFIG, sequenceSource: 'docs/sequence.md' };
+
+  const snapshot1 = {
+    snapshotComplete: true,
+    issues: [issueA, issueB],
+    pullRequests: [pr1, pr2],
+    claims: [claim1, claim2],
+    sessions: [session1, session2],
+    sequence: [20, 10]
+  };
+
+  const snapshot2 = {
+    snapshotComplete: true,
+    issues: [issueB, issueA],
+    pullRequests: [pr2, pr1],
+    claims: [claim2, claim1],
+    sessions: [session2, session1],
+    sequence: [20, 10]
+  };
+
+  const res1 = selectCandidateIssue(snapshot1, sequencedConfig);
+  const res2 = selectCandidateIssue(snapshot2, sequencedConfig);
+
+  assert.equal(res1.decisionCode, 'CANDIDATE_SELECTED');
+  assert.equal(res1.selectedCandidate.number, 20);
+  assert.deepEqual(res1, res2);
+  assert.equal(JSON.stringify(res1), JSON.stringify(res2));
 });

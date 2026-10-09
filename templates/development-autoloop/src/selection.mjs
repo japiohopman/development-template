@@ -7,7 +7,13 @@
  */
 import { validateConfig } from './config.mjs';
 import { validateIssueContract, extractMarkdownSections } from './contracts.mjs';
-import { isOpenPullRequest, sessionDisposition } from './preflight.mjs';
+import { sessionDisposition } from './preflight.mjs';
+
+function compareText(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
 
 /**
  * Extract label names from label strings or objects.
@@ -125,7 +131,7 @@ export function evaluateHumanReadiness(issue, config) {
  */
 export function evaluateDependencyState(depNumber, snapshot) {
   const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
-  const depIssue = issues.find((item) => Number(item?.number) === depNumber);
+  const depIssue = issues.find((item) => item && typeof item === 'object' && Number(item.number) === depNumber);
 
   if (!depIssue) {
     return {
@@ -182,6 +188,15 @@ export function evaluateDependencyState(depNumber, snapshot) {
 }
 
 /**
+ * Check if a pull request is merged.
+ * @param {object} pr
+ * @returns {boolean}
+ */
+export function isMergedPR(pr) {
+  return Boolean(pr && (pr.merged === true || Boolean(pr.merged_at)));
+}
+
+/**
  * Extract all issue numbers referenced in a PR body or issue_number field.
  * @param {object} pr
  * @returns {Array<number>}
@@ -202,7 +217,7 @@ function extractPRLinkedIssueNumbers(pr) {
       if (numStr) numbers.add(Number(numStr));
     }
   }
-  return Array.from(numbers);
+  return Array.from(numbers).sort((a, b) => a - b);
 }
 
 /**
@@ -210,26 +225,79 @@ function extractPRLinkedIssueNumbers(pr) {
  * @param {Array<object>} eligible
  * @param {object} config
  * @param {object} snapshot
- * @returns {Array<object>}
+ * @returns {{ valid: boolean, ordered?: Array<object>, code?: string, reason?: string }}
  */
 export function orderCandidates(eligible, config, snapshot) {
-  if (eligible.length <= 1) return eligible;
-
-  let sequenceList = null;
-  if (config?.sequenceSource && Array.isArray(snapshot?.sequence)) {
-    sequenceList = snapshot.sequence.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  if (eligible.length <= 1) {
+    return { valid: true, ordered: eligible };
   }
 
-  return [...eligible].sort((a, b) => {
-    if (sequenceList && sequenceList.length > 0) {
-      const indexA = sequenceList.indexOf(a.number);
-      const indexB = sequenceList.indexOf(b.number);
-
-      if (indexA !== -1 && indexB !== -1) return indexA - indexB;
-      if (indexA !== -1) return -1;
-      if (indexB !== -1) return 1;
+  if (config?.sequenceSource) {
+    const rawSeq = snapshot?.sequence;
+    if (!Array.isArray(rawSeq) || rawSeq.length === 0) {
+      return {
+        valid: false,
+        code: 'BLOCK_AMBIGUOUS_CHOICE',
+        reason: 'Configured sequenceSource requires a valid non-empty sequence array in snapshot.'
+      };
     }
-    return a.number - b.number;
+
+    const sequenceList = [];
+    const seen = new Set();
+    for (const item of rawSeq) {
+      const num = Number(item);
+      if (!Number.isInteger(num) || num < 1) {
+        return {
+          valid: false,
+          code: 'BLOCK_AMBIGUOUS_CHOICE',
+          reason: 'Snapshot sequence contains an invalid issue identifier (' + item + ').'
+        };
+      }
+      if (seen.has(num)) {
+        return {
+          valid: false,
+          code: 'BLOCK_AMBIGUOUS_CHOICE',
+          reason: 'Snapshot sequence contains duplicate issue identifier #' + num + '.'
+        };
+      }
+      seen.add(num);
+      sequenceList.push(num);
+    }
+
+    const missingInSeq = eligible.filter((cand) => !seen.has(cand.number));
+    if (missingInSeq.length > 0) {
+      return {
+        valid: false,
+        code: 'BLOCK_AMBIGUOUS_CHOICE',
+        reason: 'Configured sequenceSource does not provide a sequence rank for all eligible candidates (missing #' + missingInSeq.map((c) => c.number).join(', #') + ').'
+      };
+    }
+
+    const ordered = [...eligible].sort((a, b) => sequenceList.indexOf(a.number) - sequenceList.indexOf(b.number));
+    return { valid: true, ordered };
+  }
+
+  return {
+    valid: false,
+    code: 'BLOCK_AMBIGUOUS_CHOICE',
+    reason: 'Multiple eligible candidates exist without a configured sequenceSource to establish a safe ordering.'
+  };
+}
+
+function canonicalizeBlockers(blockers) {
+  return [...blockers].sort((a, b) => {
+    const numA = a.issueNumber ?? -1;
+    const numB = b.issueNumber ?? -1;
+    if (numA !== numB) return numA - numB;
+    return compareText(a.code, b.code) || compareText(a.path ?? '', b.path ?? '') || compareText(a.reason ?? '', b.reason ?? '');
+  });
+}
+
+function canonicalizeEvaluatedCandidates(evaluated) {
+  return [...evaluated].sort((a, b) => {
+    const numA = a.number ?? -1;
+    const numB = b.number ?? -1;
+    return numA - numB;
   });
 }
 
@@ -255,70 +323,72 @@ export function selectCandidateIssue(snapshot, configInput) {
   }
   const config = configCheck.config;
 
-  if (!snapshot || snapshot.snapshotComplete !== true || !Array.isArray(snapshot.issues)) {
+  const pullRequests = snapshot && (Array.isArray(snapshot.pullRequests) ? snapshot.pullRequests : Array.isArray(snapshot.openManagedPullRequests) ? snapshot.openManagedPullRequests : null);
+  const sessions = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : null;
+  const claims = snapshot && Array.isArray(snapshot.claims) ? snapshot.claims : null;
+  const issues = snapshot && Array.isArray(snapshot.issues) ? snapshot.issues : null;
+
+  if (!snapshot || snapshot.snapshotComplete !== true || !issues || !pullRequests || !sessions || !claims) {
     return {
       selectedCandidate: null,
       decisionCode: 'BLOCK_INCOMPLETE_SNAPSHOT',
       reason: 'The API snapshot is incomplete or unverified. Refusing selection.',
-      blockers: [{ code: 'INCOMPLETE_SNAPSHOT', message: 'snapshotComplete is not true or issues array is missing.' }],
+      blockers: [{ code: 'INCOMPLETE_SNAPSHOT', message: 'snapshotComplete is not true or required snapshot collections (issues, pullRequests, sessions, claims) are missing or not arrays.' }],
       evaluatedCandidates: [],
       nextAction: 'Re-run snapshot collection until preflight verification succeeds.',
       safeToDispatch: false
     };
   }
 
-  const pullRequests = Array.isArray(snapshot.pullRequests)
-    ? snapshot.pullRequests
-    : Array.isArray(snapshot.openManagedPullRequests)
-    ? snapshot.openManagedPullRequests
-    : [];
-  const openPRs = pullRequests.filter(isOpenPullRequest);
-
-  const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
-  const activeSessions = sessions.filter((s) => sessionDisposition(s).disposition === 'blocking');
-
-  const claims = Array.isArray(snapshot.claims) ? snapshot.claims : [];
-  const activeClaims = claims.filter((c) => c && c.reconciled !== true);
+  const unresolvedPRs = pullRequests.filter((pr) => pr && typeof pr === 'object' && !isMergedPR(pr));
+  const activeSessions = sessions.filter((s) => s && typeof s === 'object' && sessionDisposition(s).disposition === 'blocking');
+  const activeClaims = claims.filter((c) => c && typeof c === 'object' && c.reconciled !== true);
 
   const readyLabel = config.labels.ready;
-  const issues = snapshot.issues;
-
-  const candidateIssues = issues.filter((issue) => {
-    if (!issue || typeof issue !== 'object') return false;
-    if (String(issue.state ?? '').toLowerCase() !== 'open') return false;
-    return hasLabel(issue, readyLabel);
-  });
-
-  if (candidateIssues.length === 0) {
-    return {
-      selectedCandidate: null,
-      decisionCode: 'NO_ELIGIBLE_CANDIDATE',
-      reason: 'No open Issue has the configured readiness label "' + readyLabel + '".',
-      blockers: [],
-      evaluatedCandidates: [],
-      nextAction: 'Ensure governing Issues are open, contract-compliant, and marked with "' + readyLabel + '".',
-      safeToDispatch: false
-    };
-  }
 
   const evaluatedCandidates = [];
   const eligibleCandidates = [];
+  let malformedIssuesFound = false;
 
-  for (const candidate of candidateIssues) {
-    const candidateNumber = candidate.number;
-
-    if (!Number.isInteger(candidateNumber) || candidateNumber < 1) {
+  for (const item of issues) {
+    if (!item || typeof item !== 'object') {
+      malformedIssuesFound = true;
       evaluatedCandidates.push({
-        number: candidateNumber ?? null,
+        number: null,
         eligible: false,
-        blockers: [{ code: 'BLOCK_AMBIGUOUS_CANDIDATE', reason: 'Candidate Issue has no valid issue number.' }]
+        blockers: [{ code: 'BLOCK_AMBIGUOUS_CANDIDATE', reason: 'Snapshot contains a non-object issue entry.' }]
       });
       continue;
     }
 
+    const candidateNumber = item.number;
+    if (!Number.isInteger(candidateNumber) || candidateNumber < 1) {
+      malformedIssuesFound = true;
+      evaluatedCandidates.push({
+        number: null,
+        eligible: false,
+        blockers: [{ code: 'BLOCK_AMBIGUOUS_CANDIDATE', reason: 'Snapshot contains an issue with a missing or invalid issue number.' }]
+      });
+      continue;
+    }
+
+    const stateRaw = String(item.state ?? '').toLowerCase().trim();
+    if (!stateRaw || (stateRaw !== 'open' && stateRaw !== 'closed')) {
+      malformedIssuesFound = true;
+      evaluatedCandidates.push({
+        number: candidateNumber,
+        eligible: false,
+        blockers: [{ code: 'BLOCK_AMBIGUOUS_CANDIDATE', reason: 'Issue #' + candidateNumber + ' has a missing or unknown state (' + (item.state ?? 'unspecified') + ').' }]
+      });
+      continue;
+    }
+
+    if (stateRaw !== 'open') continue;
+    if (!hasLabel(item, readyLabel)) continue;
+
     const candidateBlockers = [];
 
-    const contractResult = validateIssueContract(candidate, { config });
+    const contractResult = validateIssueContract(item, { config });
     if (!contractResult.valid) {
       for (const err of contractResult.errors) {
         candidateBlockers.push({
@@ -329,7 +399,7 @@ export function selectCandidateIssue(snapshot, configInput) {
       }
     }
 
-    const humanGate = evaluateHumanReadiness(candidate, config);
+    const humanGate = evaluateHumanReadiness(item, config);
     if (!humanGate.verified) {
       candidateBlockers.push({
         code: 'BLOCK_HUMAN_READINESS_REQUIRED',
@@ -337,11 +407,11 @@ export function selectCandidateIssue(snapshot, configInput) {
       });
     }
 
-    const matchingPR = openPRs.find((pr) => extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
-    if (matchingPR) {
+    const matchingUnresolvedPR = unresolvedPRs.find((pr) => extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
+    if (matchingUnresolvedPR) {
       candidateBlockers.push({
         code: 'WAIT_OPEN_PR',
-        reason: 'Candidate Issue #' + candidateNumber + ' already has an open pull request #' + (matchingPR.number ?? 'unknown') + '.'
+        reason: 'Candidate Issue #' + candidateNumber + ' is linked to an unresolved pull request #' + (matchingUnresolvedPR.number ?? 'unknown') + '.'
       });
     }
 
@@ -359,7 +429,7 @@ export function selectCandidateIssue(snapshot, configInput) {
       if (Number(sessionIssue) === candidateNumber) return true;
       if (prRef?.url) {
         const prNumMatch = prRef.url.match(/\/pull\/(\d+)/);
-        if (prNumMatch && openPRs.some((pr) => pr.number === Number(prNumMatch[1]) && extractPRLinkedIssueNumbers(pr).includes(candidateNumber))) {
+        if (prNumMatch && unresolvedPRs.some((pr) => pr.number === Number(prNumMatch[1]) && extractPRLinkedIssueNumbers(pr).includes(candidateNumber))) {
           return true;
         }
       }
@@ -374,12 +444,12 @@ export function selectCandidateIssue(snapshot, configInput) {
     }
 
     const maxSessions = config.maxConcurrentSessions ?? 1;
-    const otherOpenPRs = openPRs.filter((pr) => !extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
+    const otherUnresolvedPRs = unresolvedPRs.filter((pr) => !extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
     const otherActiveSessions = activeSessions.filter((s) => {
       const sessionIssue = s?.issueNumber || s?.issue_number;
       return Number(sessionIssue) !== candidateNumber;
     });
-    const otherActiveWorkCount = otherOpenPRs.length + otherActiveSessions.length;
+    const otherActiveWorkCount = otherUnresolvedPRs.length + otherActiveSessions.length;
 
     if (otherActiveWorkCount >= maxSessions) {
       candidateBlockers.push({
@@ -388,7 +458,7 @@ export function selectCandidateIssue(snapshot, configInput) {
       });
     }
 
-    const depNumbers = extractDependencyIssueNumbers(candidate);
+    const depNumbers = extractDependencyIssueNumbers(item);
     for (const depNum of depNumbers) {
       const depEval = evaluateDependencyState(depNum, snapshot);
       if (!depEval.valid) {
@@ -400,7 +470,7 @@ export function selectCandidateIssue(snapshot, configInput) {
     }
 
     if (candidateBlockers.length === 0) {
-      eligibleCandidates.push(candidate);
+      eligibleCandidates.push(item);
       evaluatedCandidates.push({
         number: candidateNumber,
         eligible: true,
@@ -415,28 +485,61 @@ export function selectCandidateIssue(snapshot, configInput) {
     }
   }
 
+  const canonicalEvaluated = canonicalizeEvaluatedCandidates(evaluatedCandidates);
+
   if (eligibleCandidates.length === 0) {
-    const allBlockers = evaluatedCandidates.flatMap((e) =>
-      e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, reason: b.reason }))
+    const allBlockers = canonicalBlockers(
+      canonicalEvaluated.flatMap((e) =>
+        e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, path: b.path, reason: b.reason }))
+      )
     );
 
     const firstCode = allBlockers[0]?.code;
     const isUniformCode = allBlockers.length > 0 && allBlockers.every((b) => b.code === firstCode);
-    const decisionCode = isUniformCode ? firstCode : 'NO_ELIGIBLE_CANDIDATE';
+    const decisionCode = malformedIssuesFound
+      ? 'BLOCK_AMBIGUOUS_CANDIDATE'
+      : isUniformCode
+      ? firstCode
+      : allBlockers.length === 0
+      ? 'NO_ELIGIBLE_CANDIDATE'
+      : 'NO_ELIGIBLE_CANDIDATE';
 
     return {
       selectedCandidate: null,
       decisionCode,
-      reason: 'No eligible candidate Issue passed all eligibility, contract, human readiness, and dependency checks.',
+      reason: malformedIssuesFound
+        ? 'Snapshot contains malformed or ambiguous Issue records.'
+        : allBlockers.length === 0
+        ? 'No open Issue has the configured readiness label "' + readyLabel + '".'
+        : 'No eligible candidate Issue passed all eligibility, contract, human readiness, and dependency checks.',
       blockers: allBlockers,
-      evaluatedCandidates,
+      evaluatedCandidates: canonicalEvaluated,
       nextAction: 'Resolve candidate blockers before re-running selection.',
       safeToDispatch: false
     };
   }
 
-  const ordered = orderCandidates(eligibleCandidates, config, snapshot);
-  const selected = ordered[0];
+  const orderResult = orderCandidates(eligibleCandidates, config, snapshot);
+  if (!orderResult.valid) {
+    const allBlockers = canonicalBlockers([
+      ...canonicalEvaluated.flatMap((e) =>
+        e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, path: b.path, reason: b.reason }))
+      ),
+      { issueNumber: null, code: orderResult.code, reason: orderResult.reason }
+    ]);
+
+    return {
+      selectedCandidate: null,
+      decisionCode: orderResult.code,
+      reason: orderResult.reason,
+      blockers: allBlockers,
+      evaluatedCandidates: canonicalEvaluated,
+      nextAction: 'Resolve sequence ordering ambiguities before re-running selection.',
+      safeToDispatch: false
+    };
+  }
+
+  const selected = orderResult.ordered[0];
 
   return {
     selectedCandidate: {
@@ -447,8 +550,12 @@ export function selectCandidateIssue(snapshot, configInput) {
     decisionCode: 'CANDIDATE_SELECTED',
     reason: 'Candidate Issue #' + selected.number + ' selected for execution.',
     blockers: [],
-    evaluatedCandidates,
+    evaluatedCandidates: canonicalEvaluated,
     nextAction: 'Create claim for Issue #' + selected.number + ' and request dispatch confirmation.',
     safeToDispatch: false
   };
+}
+
+function canonicalBlockers(blockers) {
+  return canonicalizeBlockers(blockers);
 }
