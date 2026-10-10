@@ -154,15 +154,25 @@ export function evaluateHumanReadiness(issue, config) {
  */
 export function evaluateDependencyState(depNumber, snapshot) {
   const issues = Array.isArray(snapshot?.issues) ? snapshot.issues : [];
-  const depIssue = issues.find((item) => item && typeof item === 'object' && Number(item.number) === depNumber);
+  const matchingDepIssues = issues.filter((item) => item && typeof item === 'object' && Number(item.number) === depNumber);
 
-  if (!depIssue) {
+  if (matchingDepIssues.length === 0) {
     return {
       valid: false,
       code: 'BLOCK_DEPENDENCY_MISSING',
       reason: 'Dependency Issue #' + depNumber + ' is missing from snapshot.'
     };
   }
+
+  if (matchingDepIssues.length > 1) {
+    return {
+      valid: false,
+      code: 'BLOCK_AMBIGUOUS_CANDIDATE',
+      reason: 'Snapshot contains duplicate issue records for dependency Issue #' + depNumber + '.'
+    };
+  }
+
+  const depIssue = matchingDepIssues[0];
 
   const state = String(depIssue.state ?? '').toLowerCase();
   if (state === 'open') {
@@ -502,38 +512,44 @@ export function selectCandidateIssue(snapshot, configInput) {
       });
     }
 
-    const matchingUnresolvedPR = unresolvedPRs.find((pr) => extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
-    if (matchingUnresolvedPR) {
+    const matchingPRs = unresolvedPRs.filter((pr) => extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
+    if (matchingPRs.length > 0) {
+      const sortedPRs = [...matchingPRs].sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
+      const canonicalPR = sortedPRs[0];
       candidateBlockers.push({
         code: 'WAIT_OPEN_PR',
-        reason: 'Candidate Issue #' + candidateNumber + ' is linked to an unresolved pull request #' + (matchingUnresolvedPR.number ?? 'unknown') + '.'
+        reason: 'Candidate Issue #' + candidateNumber + ' is linked to an unresolved pull request #' + (canonicalPR.number ?? 'unknown') + '.'
       });
     }
 
-    const matchingClaim = activeClaims.find((c) => Number(c.issueNumber ?? c.issue_number) === candidateNumber);
-    if (matchingClaim) {
+    const matchingClaims = activeClaims.filter((c) => Number(c.issueNumber ?? c.issue_number) === candidateNumber);
+    if (matchingClaims.length > 0) {
+      const sortedClaims = [...matchingClaims].sort((a, b) => compareText(String(a.claimId ?? ''), String(b.claimId ?? '')));
+      const canonicalClaim = sortedClaims[0];
       candidateBlockers.push({
         code: 'BLOCK_ACTIVE_CLAIM',
-        reason: 'Candidate Issue #' + candidateNumber + ' has an active or un-reconciled claim ID ' + (matchingClaim.claimId ?? 'unknown') + '.'
+        reason: 'Candidate Issue #' + candidateNumber + ' has an active or un-reconciled claim ID ' + (canonicalClaim.claimId ?? 'unknown') + '.'
       });
     }
 
-    const matchingSession = activeSessions.find((s) => {
+    const matchingSessions = activeSessions.filter((s) => {
       const sessionPRNum = extractSessionPRNumber(s);
       const sessionIssue = Number(s?.issueNumber || s?.issue_number);
       if (sessionIssue === candidateNumber) return true;
       if (sessionPRNum) {
-        if (matchingUnresolvedPR && Number(matchingUnresolvedPR.number) === sessionPRNum) return true;
+        if (matchingPRs.some((pr) => Number(pr.number) === sessionPRNum)) return true;
         const sessionPRInSnapshot = unresolvedPRs.find((pr) => Number(pr.number) === sessionPRNum);
         if (sessionPRInSnapshot && extractPRLinkedIssueNumbers(sessionPRInSnapshot).includes(candidateNumber)) return true;
       }
       return false;
     });
 
-    if (matchingSession) {
+    if (matchingSessions.length > 0) {
+      const sortedSessions = [...matchingSessions].sort((a, b) => compareText(String(a.name ?? ''), String(b.name ?? '')));
+      const canonicalSession = sortedSessions[0];
       candidateBlockers.push({
         code: 'BLOCK_ACTIVE_SESSION',
-        reason: 'Candidate Issue #' + candidateNumber + ' is associated with an active provider session ' + (matchingSession.name ?? 'unknown') + '.'
+        reason: 'Candidate Issue #' + candidateNumber + ' is associated with an active provider session ' + (canonicalSession.name ?? 'unknown') + '.'
       });
     }
 
@@ -560,7 +576,7 @@ export function selectCandidateIssue(snapshot, configInput) {
 
       const belongsToCandidate =
         (sessionIssue && sessionIssue === candidateNumber) ||
-        (sessionPRNum && (linkedPRIssues.includes(candidateNumber) || (matchingUnresolvedPR && Number(matchingUnresolvedPR.number) === sessionPRNum)));
+        (sessionPRNum && (linkedPRIssues.includes(candidateNumber) || matchingPRs.some((pr) => Number(pr.number) === sessionPRNum)));
 
       if (!belongsToCandidate) {
         if (sessionIssue) {

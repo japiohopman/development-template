@@ -353,6 +353,56 @@ test('fails closed on malformed or duplicate issue records regardless of input a
   assert.equal(JSON.stringify(resDup1), JSON.stringify(resDup2));
 });
 
+test('permutation invariance across multiple PR, claim, and session matches', () => {
+  const candidate = makeValidIssue({ number: 10 });
+
+  // Multiple PR matches linking to candidate #10
+  const prA = { number: 50, state: 'open', issue_number: 10 };
+  const prB = { number: 60, state: 'open', issue_number: 10 };
+
+  const prSnapshot1 = makeSnapshot({ issues: [candidate], pullRequests: [prA, prB] });
+  const prSnapshot2 = makeSnapshot({ issues: [candidate], pullRequests: [prB, prA] });
+
+  const resPR1 = selectCandidateIssue(prSnapshot1, VALID_CONFIG);
+  const resPR2 = selectCandidateIssue(prSnapshot2, VALID_CONFIG);
+  assert.equal(JSON.stringify(resPR1), JSON.stringify(resPR2));
+
+  // Multiple Claim matches for candidate #10
+  const claimA = { claimId: 'claim-100', issueNumber: 10, reconciled: false };
+  const claimB = { claimId: 'claim-200', issueNumber: 10, reconciled: false };
+
+  const claimSnapshot1 = makeSnapshot({ issues: [candidate], claims: [claimA, claimB] });
+  const claimSnapshot2 = makeSnapshot({ issues: [candidate], claims: [claimB, claimA] });
+
+  const resClaim1 = selectCandidateIssue(claimSnapshot1, VALID_CONFIG);
+  const resClaim2 = selectCandidateIssue(claimSnapshot2, VALID_CONFIG);
+  assert.equal(JSON.stringify(resClaim1), JSON.stringify(resClaim2));
+
+  // Multiple Session matches for candidate #10
+  const sessionA = { name: 'sess-alpha', issueNumber: 10, state: 'IN_PROGRESS' };
+  const sessionB = { name: 'sess-beta', issueNumber: 10, state: 'IN_PROGRESS' };
+
+  const sessionSnapshot1 = makeSnapshot({ issues: [candidate], sessions: [sessionA, sessionB] });
+  const sessionSnapshot2 = makeSnapshot({ issues: [candidate], sessions: [sessionB, sessionA] });
+
+  const resSession1 = selectCandidateIssue(sessionSnapshot1, VALID_CONFIG);
+  const resSession2 = selectCandidateIssue(sessionSnapshot2, VALID_CONFIG);
+  assert.equal(JSON.stringify(resSession1), JSON.stringify(resSession2));
+
+  // Duplicate dependency issue records in snapshot issues
+  const candidateWithDep = makeValidIssue({ number: 10, dependencies: [20] });
+  const depDuplicateA = { number: 20, state: 'closed', state_reason: 'completed', title: 'Dep A' };
+  const depDuplicateB = { number: 20, state: 'open', title: 'Dep B' };
+
+  const depSnapshot1 = makeSnapshot({ issues: [candidateWithDep, depDuplicateA, depDuplicateB] });
+  const depSnapshot2 = makeSnapshot({ issues: [candidateWithDep, depDuplicateB, depDuplicateA] });
+
+  const resDep1 = selectCandidateIssue(depSnapshot1, VALID_CONFIG);
+  const resDep2 = selectCandidateIssue(depSnapshot2, VALID_CONFIG);
+  assert.equal(resDep1.decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+  assert.equal(JSON.stringify(resDep1), JSON.stringify(resDep2));
+});
+
 test('permutation invariance: shuffling collection elements produces byte-for-byte identical output', () => {
   const issueA = makeValidIssue({ number: 10, title: 'Issue 10' });
   const issueB = makeValidIssue({ number: 20, title: 'Issue 20' });
