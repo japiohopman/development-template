@@ -270,6 +270,29 @@ test('counts active claims toward repository maxConcurrentSessions concurrency l
   assert.equal(res.decisionCode, 'WAIT_CONCURRENCY_LIMIT');
 });
 
+test('counts active session with only a PR URL toward repository maxConcurrentSessions concurrency limit', () => {
+  const candidate = makeValidIssue({ number: 10 });
+
+  const snapshotWithPRURLSession = makeSnapshot({
+    issues: [candidate],
+    sessions: [
+      {
+        state: 'IN_PROGRESS',
+        outputs: [
+          {
+            pullRequest: {
+              url: 'https://github.com/example/repo/pull/99'
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  const res = selectCandidateIssue(snapshotWithPRURLSession, VALID_CONFIG);
+  assert.equal(res.decisionCode, 'WAIT_CONCURRENCY_LIMIT');
+});
+
 test('sequenceSource ordering and ambiguous sequence error cases', () => {
   const issueA = makeValidIssue({ number: 30, title: 'Issue 30' });
   const issueB = makeValidIssue({ number: 10, title: 'Issue 10' });

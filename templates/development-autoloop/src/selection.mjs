@@ -244,6 +244,20 @@ function extractPRLinkedIssueNumbers(pr) {
 }
 
 /**
+ * Extract PR number from session outputs or PR URL references.
+ * @param {object} session
+ * @returns {number|null}
+ */
+function extractSessionPRNumber(session) {
+  const outputs = Array.isArray(session?.outputs) ? session.outputs : [];
+  const prRef = outputs.find((o) => o?.pullRequest?.url)?.pullRequest ?? session?.pullRequest ?? null;
+  const url = prRef?.url || (typeof prRef === 'string' ? prRef : null) || session?.pullRequestUrl;
+  if (!url) return null;
+  const match = String(url).match(/\/pull\/(\d+)(?:\D|$)/);
+  return match ? Number(match[1]) : null;
+}
+
+/**
  * Deterministically order eligible candidate issues.
  * @param {Array<object>} eligible
  * @param {object} config
@@ -372,8 +386,8 @@ export function selectCandidateIssue(snapshot, configInput) {
     if (disp === 'blocking') {
       const sessName = typeof s.name === 'string' && s.name.trim() ? s.name : null;
       const sessIssue = Number(s.issueNumber ?? s.issue_number);
-      const prRef = s?.outputs?.find((o) => o?.pullRequest?.url)?.pullRequest;
-      if (!sessName && (!Number.isInteger(sessIssue) || sessIssue < 1) && !prRef?.url) {
+      const prRefNum = extractSessionPRNumber(s);
+      if (!sessName && (!Number.isInteger(sessIssue) || sessIssue < 1) && !prRefNum) {
         globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains an unidentifiable unresolved provider session record.' });
       }
     }
@@ -505,14 +519,13 @@ export function selectCandidateIssue(snapshot, configInput) {
     }
 
     const matchingSession = activeSessions.find((s) => {
-      const prRef = s?.outputs?.find((o) => o?.pullRequest?.url)?.pullRequest;
-      const sessionIssue = s?.issueNumber || s?.issue_number;
-      if (Number(sessionIssue) === candidateNumber) return true;
-      if (prRef?.url) {
-        const prNumMatch = prRef.url.match(/\/pull\/(\d+)/);
-        if (prNumMatch && unresolvedPRs.some((pr) => pr.number === Number(prNumMatch[1]) && extractPRLinkedIssueNumbers(pr).includes(candidateNumber))) {
-          return true;
-        }
+      const sessionPRNum = extractSessionPRNumber(s);
+      const sessionIssue = Number(s?.issueNumber || s?.issue_number);
+      if (sessionIssue === candidateNumber) return true;
+      if (sessionPRNum) {
+        if (matchingUnresolvedPR && Number(matchingUnresolvedPR.number) === sessionPRNum) return true;
+        const sessionPRInSnapshot = unresolvedPRs.find((pr) => Number(pr.number) === sessionPRNum);
+        if (sessionPRInSnapshot && extractPRLinkedIssueNumbers(sessionPRInSnapshot).includes(candidateNumber)) return true;
       }
       return false;
     });
@@ -541,10 +554,24 @@ export function selectCandidateIssue(snapshot, configInput) {
 
     for (const s of activeSessions) {
       const sessionIssue = Number(s?.issueNumber || s?.issue_number);
-      if (sessionIssue && sessionIssue !== candidateNumber) {
-        otherWorkItems.add('issue:' + sessionIssue);
-      } else if (!sessionIssue && s?.name) {
-        otherWorkItems.add('session:' + s.name);
+      const sessionPRNum = extractSessionPRNumber(s);
+      const prInSnapshot = sessionPRNum ? unresolvedPRs.find((pr) => Number(pr.number) === sessionPRNum) : null;
+      const linkedPRIssues = prInSnapshot ? extractPRLinkedIssueNumbers(prInSnapshot) : [];
+
+      const belongsToCandidate =
+        (sessionIssue && sessionIssue === candidateNumber) ||
+        (sessionPRNum && (linkedPRIssues.includes(candidateNumber) || (matchingUnresolvedPR && Number(matchingUnresolvedPR.number) === sessionPRNum)));
+
+      if (!belongsToCandidate) {
+        if (sessionIssue) {
+          otherWorkItems.add('issue:' + sessionIssue);
+        } else if (sessionPRNum) {
+          otherWorkItems.add('pr:' + sessionPRNum);
+        } else if (s?.name) {
+          otherWorkItems.add('session:' + s.name);
+        } else {
+          otherWorkItems.add('session:unidentified');
+        }
       }
     }
 
