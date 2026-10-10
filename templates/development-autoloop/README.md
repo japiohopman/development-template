@@ -4,7 +4,7 @@ A project-neutral foundation for safe, issue-first development automation.
 
 **Status: Foundation — not enabled for live dispatch.**
 
-This template contains a pure preflight decision layer, pagination helpers, schema-backed configuration validation, contract validators, tests, and operating contracts. It does not create external provider sessions, claim issues, mutate labels, merge pull requests, or auto-promote issues.
+This template contains a pure preflight decision layer, pagination helpers, schema-backed configuration validation, contract validators, deterministic Issue selection and dependency checks, tests, and operating contracts. It does not create external provider sessions, claim issues, mutate labels, merge pull requests, or auto-promote issues.
 
 ## Start here
 
@@ -12,7 +12,8 @@ This template contains a pure preflight decision layer, pagination helpers, sche
 2. Read `docs/ARCHITECTURE.md` and `docs/IMPLEMENTATION_PLAN.md`.
 3. Use Node.js 20 or newer and run `npm test` and `npm run check` from this template directory.
 4. The configuration contract is defined in `config/autoloop.schema.v1.json`. `src/config.mjs` validates against that versioned schema and returns stable `{ path, code, message }` diagnostics. The local evaluator supports the schema keyword subset explicitly used by the schema and fails closed if an unsupported keyword is introduced.
-5. Complete the implementation plan in order before enabling live automation.
+5. Deterministic Issue selection and dependency checks are in `src/selection.mjs`. Candidate selection validates readiness labels, issue contracts, `humanReadinessRequired` gates, dependency states (requiring explicit completion reasons), active PRs/claims/sessions, and sequence ordering. Selection is pure and dry-run only.
+6. Complete the implementation plan in order before enabling live automation.
 
 ## Consuming-repository Environment and secrets setup
 
@@ -45,7 +46,6 @@ Environment definitions and Environment secrets do **not** carry over when a rep
 
 The code here is intentionally provider-neutral. A production implementation still needs:
 - a provider adapter and source/repository identity verification;
-- deterministic Issue selection and dependency validation;
 - durable claims with compare-and-swap semantics and stale-claim recovery;
 - session creation with an explicit dispatch confirmation;
 - reconciliation across provider sessions, issues, branches, and PRs;

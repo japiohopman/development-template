@@ -14,5 +14,7 @@ Emit the decision code, timestamp, Issue/PR/session/claim identifiers, failed ch
 - **Ambiguous provider creation timeout:** search/reconcile by claim ID and provider metadata before retrying. If it cannot be resolved, stop and escalate.
 - **Failed state write:** dispatch must not be reported as successful. Recover state storage and reconcile before authorizing further work.
 - **Review event for an old PR head:** mark it stale and require review of the current head SHA.
+- **Unsatisfied or ambiguous dependency state (`BLOCK_DEPENDENCY_*`):** verify dependency completion state (`completed` state_reason required) or resolve missing/unplanned dependencies before candidate re-selection.
+- **Missing human readiness evidence (`BLOCK_HUMAN_READINESS_REQUIRED`):** verify the governing Issue has explicit human readiness evidence or label before dispatch.
 
 Manual cleanup must require explicit entity IDs and an exact typed confirmation. Never bulk-delete or silently abandon provider sessions. No cleanup command should be enabled until its dry-run output and tests exist.
