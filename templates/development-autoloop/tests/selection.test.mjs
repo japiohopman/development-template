@@ -149,10 +149,11 @@ test('handles completed, missing, open, not-planned, duplicate, and unknown depe
   const dep103NotPlanned = { number: 103, state: 'closed', state_reason: 'not_planned' };
   const dep104Duplicate = { number: 104, state: 'closed', state_reason: 'duplicate' };
   const dep105Unknown = { number: 105, state: 'closed', state_reason: '' };
+  const dep106BypassAttempt = { number: 106, state: 'closed', state_reason: '', completed: true };
 
   const snapshot = {
     snapshotComplete: true,
-    issues: [dep101Completed, dep102Open, dep103NotPlanned, dep104Duplicate, dep105Unknown]
+    issues: [dep101Completed, dep102Open, dep103NotPlanned, dep104Duplicate, dep105Unknown, dep106BypassAttempt]
   };
 
   assert.equal(evaluateDependencyState(101, snapshot).valid, true);
@@ -176,6 +177,10 @@ test('handles completed, missing, open, not-planned, duplicate, and unknown depe
   const unknownRes = evaluateDependencyState(105, snapshot);
   assert.equal(unknownRes.valid, false);
   assert.equal(unknownRes.code, 'BLOCK_DEPENDENCY_UNKNOWN_REASON');
+
+  const bypassRes = evaluateDependencyState(106, snapshot);
+  assert.equal(bypassRes.valid, false);
+  assert.equal(bypassRes.code, 'BLOCK_DEPENDENCY_UNKNOWN_REASON');
 });
 
 test('blocks selection if candidate has unsatisfied or missing dependencies', () => {
@@ -236,6 +241,18 @@ test('blocks candidate represented by active claim or active session', () => {
   assert.equal(selectCandidateIssue(snapshotWithSession, VALID_CONFIG).decisionCode, 'BLOCK_ACTIVE_SESSION');
 });
 
+test('counts active claims toward repository maxConcurrentSessions concurrency limit', () => {
+  const candidate = makeValidIssue({ number: 10 });
+
+  const snapshotWithOtherClaim = makeSnapshot({
+    issues: [candidate],
+    claims: [{ claimId: 'c-999', issueNumber: 5, reconciled: false }]
+  });
+
+  const res = selectCandidateIssue(snapshotWithOtherClaim, VALID_CONFIG);
+  assert.equal(res.decisionCode, 'WAIT_CONCURRENCY_LIMIT');
+});
+
 test('sequenceSource ordering and ambiguous sequence error cases', () => {
   const issueA = makeValidIssue({ number: 30, title: 'Issue 30' });
   const issueB = makeValidIssue({ number: 10, title: 'Issue 10' });
@@ -266,7 +283,7 @@ test('sequenceSource ordering and ambiguous sequence error cases', () => {
   assert.equal(incompleteSeqRes.decisionCode, 'BLOCK_AMBIGUOUS_CHOICE');
 });
 
-test('fails closed on malformed issue records', () => {
+test('fails closed on malformed or duplicate issue records regardless of input array order', () => {
   const nonObjectIssueSnapshot = makeSnapshot({
     issues: ['not-an-object']
   });
@@ -281,6 +298,15 @@ test('fails closed on malformed issue records', () => {
     issues: [{ number: 99, title: 'Unknown state', state: 'invalid-state', labels: ['roadmap-ready'] }]
   });
   assert.equal(selectCandidateIssue(unknownStateSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+
+  const duplicateIssueA = makeValidIssue({ number: 10, title: 'Title First' });
+  const duplicateIssueB = makeValidIssue({ number: 10, title: 'Title Second' });
+
+  const duplicateSnapshot1 = makeSnapshot({ issues: [duplicateIssueA, duplicateIssueB] });
+  const duplicateSnapshot2 = makeSnapshot({ issues: [duplicateIssueB, duplicateIssueA] });
+
+  assert.equal(selectCandidateIssue(duplicateSnapshot1, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+  assert.equal(selectCandidateIssue(duplicateSnapshot2, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
 });
 
 test('permutation invariance: shuffling collection elements produces byte-for-byte identical output', () => {

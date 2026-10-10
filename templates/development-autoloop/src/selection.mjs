@@ -15,6 +15,23 @@ function compareText(a, b) {
   return 0;
 }
 
+function canonicalizeBlockers(blockers) {
+  return [...blockers].sort((a, b) => {
+    const numA = a.issueNumber ?? -1;
+    const numB = b.issueNumber ?? -1;
+    if (numA !== numB) return numA - numB;
+    return compareText(a.code, b.code) || compareText(a.path ?? '', b.path ?? '') || compareText(a.reason ?? '', b.reason ?? '');
+  });
+}
+
+function canonicalizeEvaluatedCandidates(evaluated) {
+  return [...evaluated].sort((a, b) => {
+    const numA = a.number ?? -1;
+    const numB = b.number ?? -1;
+    return numA - numB;
+  });
+}
+
 /**
  * Extract label names from label strings or objects.
  * @param {Array<string|object>} labels
@@ -169,7 +186,7 @@ export function evaluateDependencyState(depNumber, snapshot) {
       };
     }
 
-    if (reasonRaw === 'completed' || depIssue.completed === true) {
+    if (reasonRaw === 'completed') {
       return { valid: true };
     }
 
@@ -284,23 +301,6 @@ export function orderCandidates(eligible, config, snapshot) {
   };
 }
 
-function canonicalizeBlockers(blockers) {
-  return [...blockers].sort((a, b) => {
-    const numA = a.issueNumber ?? -1;
-    const numB = b.issueNumber ?? -1;
-    if (numA !== numB) return numA - numB;
-    return compareText(a.code, b.code) || compareText(a.path ?? '', b.path ?? '') || compareText(a.reason ?? '', b.reason ?? '');
-  });
-}
-
-function canonicalizeEvaluatedCandidates(evaluated) {
-  return [...evaluated].sort((a, b) => {
-    const numA = a.number ?? -1;
-    const numB = b.number ?? -1;
-    return numA - numB;
-  });
-}
-
 /**
  * Select exactly one eligible Issue for automation execution using pure deterministic evaluation.
  *
@@ -349,6 +349,22 @@ export function selectCandidateIssue(snapshot, configInput) {
   const evaluatedCandidates = [];
   const eligibleCandidates = [];
   let malformedIssuesFound = false;
+
+  const seenIssueNumbers = new Set();
+  for (const item of issues) {
+    if (item && typeof item === 'object' && Number.isInteger(item.number) && item.number > 0) {
+      if (seenIssueNumbers.has(item.number)) {
+        malformedIssuesFound = true;
+        evaluatedCandidates.push({
+          number: item.number,
+          eligible: false,
+          blockers: [{ code: 'BLOCK_AMBIGUOUS_CANDIDATE', reason: 'Snapshot contains duplicate issue records for issue #' + item.number + '.' }]
+        });
+      } else {
+        seenIssueNumbers.add(item.number);
+      }
+    }
+  }
 
   for (const item of issues) {
     if (!item || typeof item !== 'object') {
@@ -444,13 +460,39 @@ export function selectCandidateIssue(snapshot, configInput) {
     }
 
     const maxSessions = config.maxConcurrentSessions ?? 1;
-    const otherUnresolvedPRs = unresolvedPRs.filter((pr) => !extractPRLinkedIssueNumbers(pr).includes(candidateNumber));
-    const otherActiveSessions = activeSessions.filter((s) => {
-      const sessionIssue = s?.issueNumber || s?.issue_number;
-      return Number(sessionIssue) !== candidateNumber;
-    });
-    const otherActiveWorkCount = otherUnresolvedPRs.length + otherActiveSessions.length;
 
+    // Deduplicate active work items that do not belong to candidateNumber
+    const otherWorkItems = new Set();
+
+    for (const pr of unresolvedPRs) {
+      const linked = extractPRLinkedIssueNumbers(pr);
+      const otherLinked = linked.filter((num) => num !== candidateNumber);
+      if (otherLinked.length > 0) {
+        otherLinked.forEach((num) => otherWorkItems.add('issue:' + num));
+      } else if (!linked.includes(candidateNumber) && pr.number) {
+        otherWorkItems.add('pr:' + pr.number);
+      }
+    }
+
+    for (const s of activeSessions) {
+      const sessionIssue = Number(s?.issueNumber || s?.issue_number);
+      if (sessionIssue && sessionIssue !== candidateNumber) {
+        otherWorkItems.add('issue:' + sessionIssue);
+      } else if (!sessionIssue && s?.name) {
+        otherWorkItems.add('session:' + s.name);
+      }
+    }
+
+    for (const c of activeClaims) {
+      const claimIssue = Number(c?.issueNumber || c?.issue_number);
+      if (claimIssue && claimIssue !== candidateNumber) {
+        otherWorkItems.add('issue:' + claimIssue);
+      } else if (!claimIssue && c?.claimId) {
+        otherWorkItems.add('claim:' + c.claimId);
+      }
+    }
+
+    const otherActiveWorkCount = otherWorkItems.size;
     if (otherActiveWorkCount >= maxSessions) {
       candidateBlockers.push({
         code: 'WAIT_CONCURRENCY_LIMIT',
@@ -486,30 +528,35 @@ export function selectCandidateIssue(snapshot, configInput) {
   }
 
   const canonicalEvaluated = canonicalizeEvaluatedCandidates(evaluatedCandidates);
+  const allBlockers = canonicalizeBlockers(
+    canonicalEvaluated.flatMap((e) =>
+      e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, path: b.path, reason: b.reason }))
+    )
+  );
+
+  if (malformedIssuesFound) {
+    return {
+      selectedCandidate: null,
+      decisionCode: 'BLOCK_AMBIGUOUS_CANDIDATE',
+      reason: 'Snapshot contains malformed or duplicate Issue records.',
+      blockers: allBlockers,
+      evaluatedCandidates: canonicalEvaluated,
+      nextAction: 'Fix malformed or duplicate Issue records before re-running selection.',
+      safeToDispatch: false
+    };
+  }
 
   if (eligibleCandidates.length === 0) {
-    const allBlockers = canonicalBlockers(
-      canonicalEvaluated.flatMap((e) =>
-        e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, path: b.path, reason: b.reason }))
-      )
-    );
-
     const firstCode = allBlockers[0]?.code;
     const isUniformCode = allBlockers.length > 0 && allBlockers.every((b) => b.code === firstCode);
-    const decisionCode = malformedIssuesFound
-      ? 'BLOCK_AMBIGUOUS_CANDIDATE'
-      : isUniformCode
+    const decisionCode = isUniformCode
       ? firstCode
-      : allBlockers.length === 0
-      ? 'NO_ELIGIBLE_CANDIDATE'
       : 'NO_ELIGIBLE_CANDIDATE';
 
     return {
       selectedCandidate: null,
       decisionCode,
-      reason: malformedIssuesFound
-        ? 'Snapshot contains malformed or ambiguous Issue records.'
-        : allBlockers.length === 0
+      reason: allBlockers.length === 0
         ? 'No open Issue has the configured readiness label "' + readyLabel + '".'
         : 'No eligible candidate Issue passed all eligibility, contract, human readiness, and dependency checks.',
       blockers: allBlockers,
@@ -521,10 +568,8 @@ export function selectCandidateIssue(snapshot, configInput) {
 
   const orderResult = orderCandidates(eligibleCandidates, config, snapshot);
   if (!orderResult.valid) {
-    const allBlockers = canonicalBlockers([
-      ...canonicalEvaluated.flatMap((e) =>
-        e.blockers.map((b) => ({ issueNumber: e.number, code: b.code, path: b.path, reason: b.reason }))
-      ),
+    const combinedBlockers = canonicalizeBlockers([
+      ...allBlockers,
       { issueNumber: null, code: orderResult.code, reason: orderResult.reason }
     ]);
 
@@ -532,7 +577,7 @@ export function selectCandidateIssue(snapshot, configInput) {
       selectedCandidate: null,
       decisionCode: orderResult.code,
       reason: orderResult.reason,
-      blockers: allBlockers,
+      blockers: combinedBlockers,
       evaluatedCandidates: canonicalEvaluated,
       nextAction: 'Resolve sequence ordering ambiguities before re-running selection.',
       safeToDispatch: false
@@ -554,8 +599,4 @@ export function selectCandidateIssue(snapshot, configInput) {
     nextAction: 'Create claim for Issue #' + selected.number + ' and request dispatch confirmation.',
     safeToDispatch: false
   };
-}
-
-function canonicalBlockers(blockers) {
-  return canonicalizeBlockers(blockers);
 }
