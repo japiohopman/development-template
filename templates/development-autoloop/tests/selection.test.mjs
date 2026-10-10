@@ -77,6 +77,23 @@ test('returns BLOCK_INCOMPLETE_SNAPSHOT when snapshot is incomplete or missing c
   assert.equal(selectCandidateIssue(missingClaims, VALID_CONFIG).decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
 });
 
+test('fails closed with BLOCK_AMBIGUOUS_ACTIVE_WORK when pullRequests, sessions, or claims contain malformed active work', () => {
+  const malformedPRSnapshot = makeSnapshot({
+    pullRequests: [{ state: 'open' }] // missing pr number and issue linkage
+  });
+  assert.equal(selectCandidateIssue(malformedPRSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_ACTIVE_WORK');
+
+  const malformedSessionSnapshot = makeSnapshot({
+    sessions: [{ state: 'IN_PROGRESS' }] // missing name and issue number
+  });
+  assert.equal(selectCandidateIssue(malformedSessionSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_ACTIVE_WORK');
+
+  const malformedClaimSnapshot = makeSnapshot({
+    claims: [{ reconciled: false }] // missing claimId and issue number
+  });
+  assert.equal(selectCandidateIssue(malformedClaimSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_ACTIVE_WORK');
+});
+
 test('returns BLOCK_INVALID_CONFIG on invalid configuration', () => {
   const result = selectCandidateIssue(makeSnapshot(), { invalid: true });
 
@@ -299,14 +316,18 @@ test('fails closed on malformed or duplicate issue records regardless of input a
   });
   assert.equal(selectCandidateIssue(unknownStateSnapshot, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
 
-  const duplicateIssueA = makeValidIssue({ number: 10, title: 'Title First' });
-  const duplicateIssueB = makeValidIssue({ number: 10, title: 'Title Second' });
+  const duplicateIssueA = makeValidIssue({ number: 10, title: 'Title First', humanReadiness: true });
+  const duplicateIssueB = makeValidIssue({ number: 10, title: 'Title Second', humanReadiness: false });
 
   const duplicateSnapshot1 = makeSnapshot({ issues: [duplicateIssueA, duplicateIssueB] });
   const duplicateSnapshot2 = makeSnapshot({ issues: [duplicateIssueB, duplicateIssueA] });
 
-  assert.equal(selectCandidateIssue(duplicateSnapshot1, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
-  assert.equal(selectCandidateIssue(duplicateSnapshot2, VALID_CONFIG).decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+  const resDup1 = selectCandidateIssue(duplicateSnapshot1, VALID_CONFIG);
+  const resDup2 = selectCandidateIssue(duplicateSnapshot2, VALID_CONFIG);
+
+  assert.equal(resDup1.decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+  assert.equal(resDup2.decisionCode, 'BLOCK_AMBIGUOUS_CANDIDATE');
+  assert.equal(JSON.stringify(resDup1), JSON.stringify(resDup2));
 });
 
 test('permutation invariance: shuffling collection elements produces byte-for-byte identical output', () => {

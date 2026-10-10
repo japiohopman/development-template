@@ -20,7 +20,11 @@ function canonicalizeBlockers(blockers) {
     const numA = a.issueNumber ?? -1;
     const numB = b.issueNumber ?? -1;
     if (numA !== numB) return numA - numB;
-    return compareText(a.code, b.code) || compareText(a.path ?? '', b.path ?? '') || compareText(a.reason ?? '', b.reason ?? '');
+    return (
+      compareText(a.code, b.code) ||
+      compareText(a.path ?? '', b.path ?? '') ||
+      compareText(a.reason ?? '', b.reason ?? '')
+    );
   });
 }
 
@@ -28,7 +32,9 @@ function canonicalizeEvaluatedCandidates(evaluated) {
   return [...evaluated].sort((a, b) => {
     const numA = a.number ?? -1;
     const numB = b.number ?? -1;
-    return numA - numB;
+    if (numA !== numB) return numA - numB;
+    if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
+    return compareText(JSON.stringify(a.blockers), JSON.stringify(b.blockers));
   });
 }
 
@@ -336,6 +342,65 @@ export function selectCandidateIssue(snapshot, configInput) {
       blockers: [{ code: 'INCOMPLETE_SNAPSHOT', message: 'snapshotComplete is not true or required snapshot collections (issues, pullRequests, sessions, claims) are missing or not arrays.' }],
       evaluatedCandidates: [],
       nextAction: 'Re-run snapshot collection until preflight verification succeeds.',
+      safeToDispatch: false
+    };
+  }
+
+  // Validate active-work collections for malformed/unidentifiable records
+  const globalActiveWorkBlockers = [];
+
+  for (const pr of pullRequests) {
+    if (!pr || typeof pr !== 'object') {
+      globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains a non-object pull request record.' });
+      continue;
+    }
+    if (!isMergedPR(pr)) {
+      const prNumber = Number(pr.number);
+      const linked = extractPRLinkedIssueNumbers(pr);
+      if ((!Number.isInteger(prNumber) || prNumber < 1) && linked.length === 0) {
+        globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains an unidentifiable unresolved pull request record.' });
+      }
+    }
+  }
+
+  for (const s of sessions) {
+    if (!s || typeof s !== 'object') {
+      globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains a non-object provider session record.' });
+      continue;
+    }
+    const disp = sessionDisposition(s).disposition;
+    if (disp === 'blocking') {
+      const sessName = typeof s.name === 'string' && s.name.trim() ? s.name : null;
+      const sessIssue = Number(s.issueNumber ?? s.issue_number);
+      const prRef = s?.outputs?.find((o) => o?.pullRequest?.url)?.pullRequest;
+      if (!sessName && (!Number.isInteger(sessIssue) || sessIssue < 1) && !prRef?.url) {
+        globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains an unidentifiable unresolved provider session record.' });
+      }
+    }
+  }
+
+  for (const c of claims) {
+    if (!c || typeof c !== 'object') {
+      globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains a non-object claim record.' });
+      continue;
+    }
+    if (c.reconciled !== true) {
+      const claimId = typeof c.claimId === 'string' && c.claimId.trim() ? c.claimId : null;
+      const claimIssue = Number(c.issueNumber ?? c.issue_number);
+      if (!claimId && (!Number.isInteger(claimIssue) || claimIssue < 1)) {
+        globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains an unidentifiable active claim record.' });
+      }
+    }
+  }
+
+  if (globalActiveWorkBlockers.length > 0) {
+    return {
+      selectedCandidate: null,
+      decisionCode: 'BLOCK_AMBIGUOUS_ACTIVE_WORK',
+      reason: 'Snapshot contains malformed or unidentifiable active work records in pullRequests, sessions, or claims.',
+      blockers: canonicalizeBlockers(globalActiveWorkBlockers),
+      evaluatedCandidates: [],
+      nextAction: 'Fix or reconcile malformed active-work records before re-running selection.',
       safeToDispatch: false
     };
   }
