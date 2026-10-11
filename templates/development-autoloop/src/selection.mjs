@@ -66,23 +66,39 @@ export function hasLabel(issue, targetLabel) {
   return names.some((name) => name.toLowerCase() === String(targetLabel).toLowerCase());
 }
 
+const STRICT_STRUCTURED_REF = /^(?:#?(\d+)|https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/issues\/(\d+))$/i;
+
 /**
  * Extract dependency issue numbers from structured field or body section.
+ * Returns { valid: boolean, numbers: Array<number>, reason?: string }.
  * @param {object} issue
- * @returns {Array<number>} sorted unique list of issue numbers
+ * @returns {{ valid: boolean, numbers: Array<number>, reason?: string }}
  */
 export function extractDependencyIssueNumbers(issue) {
   const dependencyNumbers = new Set();
+  let unparseable = false;
 
   if (Array.isArray(issue?.dependencies)) {
     for (const item of issue.dependencies) {
       if (typeof item === 'number' && Number.isInteger(item) && item > 0) {
         dependencyNumbers.add(item);
       } else if (typeof item === 'string') {
-        const match = item.match(/#?(\d+)/);
-        if (match) dependencyNumbers.add(Number(match[1]));
-      } else if (item && typeof item === 'object' && Number.isInteger(Number(item.number))) {
+        const trimmed = item.trim();
+        const match = trimmed.match(STRICT_STRUCTURED_REF);
+        if (match) {
+          const num = Number(match[1] || match[2]);
+          if (Number.isInteger(num) && num > 0) {
+            dependencyNumbers.add(num);
+          } else {
+            unparseable = true;
+          }
+        } else {
+          unparseable = true;
+        }
+      } else if (item && typeof item === 'object' && Number.isInteger(Number(item.number)) && Number(item.number) > 0) {
         dependencyNumbers.add(Number(item.number));
+      } else {
+        unparseable = true;
       }
     }
   }
@@ -96,13 +112,17 @@ export function extractDependencyIssueNumbers(issue) {
       const isNoneText = /^(none|n\/a|no dependencies|nil|0|-)\.?$/i.test(trimmed);
 
       if (!isNoneText) {
-        const matches = trimmed.matchAll(/(?:#(\d+)|https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/issues\/(\d+))/gi);
-        for (const match of matches) {
-          const numStr = match[1] || match[2];
-          if (numStr) {
-            const num = Number(numStr);
-            if (Number.isInteger(num) && num > 0 && num !== issue.number) {
-              dependencyNumbers.add(num);
+        const matches = Array.from(trimmed.matchAll(/(?:#(\d+)|https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/issues\/(\d+))/gi));
+        if (matches.length === 0) {
+          unparseable = true;
+        } else {
+          for (const match of matches) {
+            const numStr = match[1] || match[2];
+            if (numStr) {
+              const num = Number(numStr);
+              if (Number.isInteger(num) && num > 0 && num !== issue?.number) {
+                dependencyNumbers.add(num);
+              }
             }
           }
         }
@@ -110,7 +130,18 @@ export function extractDependencyIssueNumbers(issue) {
     }
   }
 
-  return Array.from(dependencyNumbers).sort((a, b) => a - b);
+  if (unparseable) {
+    return {
+      valid: false,
+      numbers: [],
+      reason: 'IssueDependencies section or array contains unparseable prose or invalid Issue references.'
+    };
+  }
+
+  return {
+    valid: true,
+    numbers: Array.from(dependencyNumbers).sort((a, b) => a - b)
+  };
 }
 
 /**
@@ -608,14 +639,21 @@ export function selectCandidateIssue(snapshot, configInput) {
       });
     }
 
-    const depNumbers = extractDependencyIssueNumbers(item);
-    for (const depNum of depNumbers) {
-      const depEval = evaluateDependencyState(depNum, snapshot);
-      if (!depEval.valid) {
-        candidateBlockers.push({
-          code: depEval.code,
-          reason: depEval.reason
-        });
+    const depResult = extractDependencyIssueNumbers(item);
+    if (!depResult.valid) {
+      candidateBlockers.push({
+        code: 'BLOCK_DEPENDENCY_AMBIGUOUS',
+        reason: depResult.reason || ('Candidate Issue #' + candidateNumber + ' has unparseable or malformed dependency specifications.')
+      });
+    } else {
+      for (const depNum of depResult.numbers) {
+        const depEval = evaluateDependencyState(depNum, snapshot);
+        if (!depEval.valid) {
+          candidateBlockers.push({
+            code: depEval.code,
+            reason: depEval.reason
+          });
+        }
       }
     }
 

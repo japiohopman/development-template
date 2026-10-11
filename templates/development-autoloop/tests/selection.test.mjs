@@ -157,7 +157,45 @@ Validation
   });
 
   const extracted = extractDependencyIssueNumbers(issueWithDeps);
-  assert.deepEqual(extracted, [20, 21, 22, 23]);
+  assert.equal(extracted.valid, true);
+  assert.deepEqual(extracted.numbers, [20, 21, 22, 23]);
+});
+
+test('blocks selection on non-empty unparseable Dependencies prose or invalid structured dependency strings', () => {
+  const issueWithBadProse = makeValidIssue({
+    body: `
+# Scope
+Scope
+
+# Acceptance criteria
+Criteria
+
+# Dependencies
+Requires backend service migration and database redesign
+
+# Out of scope
+Out of scope
+
+# Validation plan
+Validation
+    `
+  });
+
+  const resProse = extractDependencyIssueNumbers(issueWithBadProse);
+  assert.equal(resProse.valid, false);
+
+  const snapshotProse = makeSnapshot({ issues: [issueWithBadProse] });
+  assert.equal(selectCandidateIssue(snapshotProse, VALID_CONFIG).decisionCode, 'BLOCK_DEPENDENCY_AMBIGUOUS');
+
+  const issueWithBadString = makeValidIssue({
+    dependencies: ['v2 api']
+  });
+
+  const resString = extractDependencyIssueNumbers(issueWithBadString);
+  assert.equal(resString.valid, false);
+
+  const snapshotString = makeSnapshot({ issues: [issueWithBadString] });
+  assert.equal(selectCandidateIssue(snapshotString, VALID_CONFIG).decisionCode, 'BLOCK_DEPENDENCY_AMBIGUOUS');
 });
 
 test('handles completed, missing, open, not-planned, duplicate, and unknown dependency states', () => {
