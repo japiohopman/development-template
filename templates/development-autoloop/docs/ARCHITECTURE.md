@@ -19,7 +19,7 @@ Blocked and escalated are explicit outcomes, not hidden retries. A material scop
 8. **Recovery/diagnostics:** record block reason, IDs, run timestamp, mutations, and next safe action.
 
 ## Current implementation
-The code currently implements only the safe foundation for pagination, session/PR reconciliation, and preflight decisions. Layers 1 and 4–8 require additional work before live dispatch is enabled.
+The code currently implements layers 1 (configuration validation), 2 (read-only preflight and pagination), 3 (pure preflight decision functions), and 4 (deterministic issue selection and dependency validation). Layers 5–8 require additional work before live dispatch is enabled.
 
 ## State and concurrency
 Do not push transient queue-state files to the protected default branch. A preferred GitHub-native starting point is a dedicated state branch updated with expected-head/compare-and-swap semantics. A dedicated controller/database may be required for cross-repository global concurrency; separate template copies cannot promise an account-wide cap by themselves.

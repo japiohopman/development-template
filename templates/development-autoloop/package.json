@@ -7,7 +7,7 @@
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
-    "check": "node --check src/preflight.mjs && node --check src/pagination.mjs && node --check src/config.mjs && node --check src/contracts.mjs"
+    "check": "node --check src/preflight.mjs && node --check src/pagination.mjs && node --check src/config.mjs && node --check src/contracts.mjs && node --check src/selection.mjs"
   },
   "engines": {
     "node": ">=20"
