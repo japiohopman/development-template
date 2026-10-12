@@ -206,6 +206,7 @@ test('dispatchTask succeeds with a valid schema-backed config and preflight gate
   const config = sampleConfig();
   const configCheck = validateConfig(config);
   assert.equal(configCheck.valid, true, 'Sample config must pass validateConfig schema checks.');
+  const validatedConfig = configCheck.config;
 
   const packet = samplePacket({ issueNumber: 100 });
   const stateAdapter = new InMemoryStateAdapter();
@@ -229,7 +230,7 @@ test('dispatchTask succeeds with a valid schema-backed config and preflight gate
   const providerClient = new JulesClient({ apiKey: 'my-key', fetchImpl: mockFetch });
 
   const res = await dispatchTask({
-    config,
+    config: validatedConfig,
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
@@ -244,6 +245,9 @@ test('dispatchTask succeeds with a valid schema-backed config and preflight gate
   assert.equal(res.claim.metadata.normalizedProviderStatus, 'QUEUED');
   assert.equal(res.claim.metadata.rawProviderState, 'QUEUED');
   assert.ok(res.claim.metadata.lastObservedAt);
+  assert.ok(res.claim.metadata.providerLifecycleReason);
+  const persistedClaim = (await stateAdapter.readState()).claims[0];
+  assert.deepEqual(persistedClaim.metadata, res.claim.metadata);
 });
 
 test('dispatchTask tests ambiguous create timeout before vs after request transmission', async () => {
@@ -252,10 +256,12 @@ test('dispatchTask tests ambiguous create timeout before vs after request transm
   // Case A: Timeout before transmission (e.g. AbortError / Connect timeout)
   const packetA = samplePacket({ issueNumber: 210, claimId: 'claim-210-before' });
   const stateAdapterA = new InMemoryStateAdapter();
+  let createPostCountA = 0;
 
   const mockFetchBefore = createDefaultMockFetch({
     customRoute: async (url, options) => {
       if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
+        createPostCountA++;
         const err = new Error('Connect timeout before transmission');
         err.name = 'AbortError';
         throw err;
@@ -278,14 +284,17 @@ test('dispatchTask tests ambiguous create timeout before vs after request transm
 
   assert.equal(resA.success, false);
   assert.equal(resA.decisionCode, DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED);
+  assert.equal(createPostCountA, 1, 'ambiguous create is never automatically retried');
 
   // Case B: Timeout after transmission (HTTP 504 Gateway Timeout)
   const packetB = samplePacket({ issueNumber: 220, claimId: 'claim-220-after' });
   const stateAdapterB = new InMemoryStateAdapter();
+  let createPostCountB = 0;
 
   const mockFetchAfter = createDefaultMockFetch({
     customRoute: async (url, options) => {
       if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
+        createPostCountB++;
         const err = new Error('HTTP 504 Gateway Timeout after request sent');
         err.code = 'JULES_HTTP_ERROR';
         err.status = 504;
@@ -309,6 +318,7 @@ test('dispatchTask tests ambiguous create timeout before vs after request transm
 
   assert.equal(resB.success, false);
   assert.equal(resB.decisionCode, DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED);
+  assert.equal(createPostCountB, 1, 'ambiguous create is never automatically retried');
 });
 
 test('dispatchTask fails preflight gate if snapshot selection is blocked', async () => {
@@ -513,6 +523,10 @@ test('dispatchTask blocks session with UNKNOWN normalized state', async () => {
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PROVIDER_FAILED);
   assert.ok(res.session.observedAt);
   assert.equal(res.claim.sessionId, 'sess-unknown-state');
+  assert.match(res.claim.metadata.providerLifecycleReason, /Blocked/);
+  const persistedClaim = (await stateAdapter.readState()).claims[0];
+  assert.equal(persistedClaim.metadata.normalizedProviderStatus, 'UNKNOWN');
+  assert.match(persistedClaim.metadata.providerLifecycleReason, /do not create a replacement session/);
 });
 
 test('dispatchTask handles timeout during session creation and blocks when 0 matches found', async () => {
