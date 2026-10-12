@@ -71,6 +71,42 @@ test('JulesClient listSources handles pagination and verifies branch if specifie
   assert.equal(noBranchMatch, null);
 });
 
+test('JulesClient findSourceForRepository rejects when source branches array is missing or empty', async () => {
+  const mockFetch = async () => {
+    return {
+      ok: true,
+      json: async () => ({
+        sources: [
+          { name: 'sources/github/acme/no-branches', githubRepo: { owner: 'acme', repo: 'no-branches', branches: [] } },
+          { name: 'sources/github/acme/null-branches', githubRepo: { owner: 'acme', repo: 'null-branches' } }
+        ]
+      })
+    };
+  };
+
+  const client = new JulesClient({ apiKey: 'test-key', fetchImpl: mockFetch });
+  const res1 = await client.findSourceForRepository('acme/no-branches', 'main');
+  assert.equal(res1, null);
+
+  const res2 = await client.findSourceForRepository('acme/null-branches', 'main');
+  assert.equal(res2, null);
+});
+
+test('JulesClient _request enforces redirect: error', async () => {
+  let capturedOptions = null;
+  const mockFetch = async (url, options) => {
+    capturedOptions = options;
+    return {
+      ok: true,
+      json: async () => ({ sources: [] })
+    };
+  };
+
+  const client = new JulesClient({ apiKey: 'test-key', fetchImpl: mockFetch });
+  await client.listSources();
+  assert.equal(capturedOptions.redirect, 'error');
+});
+
 test('JulesClient createSession enforces requirePlanApproval: true', async () => {
   let capturedBody = null;
   let capturedHeaders = null;

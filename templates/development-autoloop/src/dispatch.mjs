@@ -137,41 +137,89 @@ export async function dispatchTask({
     };
   }
 
-  // Exact confirmation check at both workflow and adapter boundary
+  // Exact confirmation check at both workflow and adapter boundary (must be non-empty string)
   const expectedConfirmation = config.requiredConfirmation ?? config.confirmation;
-  if (typeof confirmation !== 'string' || confirmation !== expectedConfirmation) {
+  if (typeof expectedConfirmation !== 'string' || expectedConfirmation.trim().length === 0 || typeof confirmation !== 'string' || confirmation !== expectedConfirmation) {
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID,
-      reason: 'Dispatch confirmation does not match configured confirmation exactly.',
+      reason: 'Dispatch confirmation does not match non-empty configured confirmation exactly.',
       session: null,
       claim: null
     };
   }
 
-  // Preflight and Issue Selection Gating
+  // Mandatory Preflight and Issue Selection Gate
   let evalSelection = selectionResult;
   if (!evalSelection && snapshot) {
     evalSelection = selectCandidateIssue(snapshot, config);
   }
 
-  if (evalSelection) {
-    if (evalSelection.decisionCode !== 'CANDIDATE_SELECTED' || evalSelection.selectedCandidate?.number !== packet.issueNumber) {
-      return {
-        success: false,
-        decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
-        reason: `Preflight/selection gate blocked dispatch for Issue #${packet.issueNumber} (${evalSelection.decisionCode}): ${evalSelection.reason}`,
-        session: null,
-        claim: null,
-        selectionResult: evalSelection
-      };
-    }
+  if (!evalSelection) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+      reason: 'Preflight/selection gate evidence (snapshot or selectionResult) is required but missing.',
+      session: null,
+      claim: null
+    };
+  }
+
+  if (evalSelection.decisionCode !== 'CANDIDATE_SELECTED' || evalSelection.selectedCandidate?.number !== packet.issueNumber) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+      reason: `Preflight/selection gate blocked dispatch for Issue #${packet.issueNumber} (${evalSelection.decisionCode}): ${evalSelection.reason}`,
+      session: null,
+      claim: null,
+      selectionResult: evalSelection
+    };
   }
 
   const currentDate = new Date(now);
   const targetRepo = normalizeRepositoryIdentity(packet.repository).repository;
 
-  // Step 1: Acquire durable claim BEFORE calling provider create
+  // Read-only Setup Step A: Initialize provider client
+  let client = providerClient;
+  if (!client) {
+    const key = apiKey || process.env.JULES_API_KEY;
+    if (!key) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+        reason: 'Jules API key is missing from secrets or environment.',
+        session: null,
+        claim: null
+      };
+    }
+    client = new JulesClient({ apiKey: key, fetchImpl });
+  }
+
+  // Read-only Setup Step B: Resolve repository source and starting branch on Jules API BEFORE claim write
+  let source;
+  try {
+    source = await client.findSourceForRepository(targetRepo, packet.startingBranch);
+  } catch (err) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+      reason: 'Failed to resolve Jules repository source: ' + sanitizeJulesErrorMessage(err, client.apiKey),
+      session: null,
+      claim: null
+    };
+  }
+
+  if (!source) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+      reason: `No matching Jules source found for repository ${targetRepo.owner}/${targetRepo.repo} with startingBranch '${packet.startingBranch}'.`,
+      session: null,
+      claim: null
+    };
+  }
+
+  // Step 1: Acquire durable claim BEFORE calling provider session creation
   const claimId = packet.claimId || `claim-${packet.issueNumber}-${currentDate.getTime()}`;
   const claimRes = await acquireClaim({
     stateAdapter,
@@ -194,46 +242,6 @@ export async function dispatchTask({
   }
 
   const activeClaim = claimRes.claim;
-
-  // Step 2: Initialize provider client
-  let client = providerClient;
-  if (!client) {
-    const key = apiKey || process.env.JULES_API_KEY;
-    if (!key) {
-      return {
-        success: false,
-        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
-        reason: 'Jules API key is missing from secrets or environment.',
-        session: null,
-        claim: activeClaim
-      };
-    }
-    client = new JulesClient({ apiKey: key, fetchImpl });
-  }
-
-  // Step 3: Resolve repository source on Jules API and verify starting branch exists
-  let source;
-  try {
-    source = await client.findSourceForRepository(targetRepo, packet.startingBranch);
-  } catch (err) {
-    return {
-      success: false,
-      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
-      reason: 'Failed to resolve Jules repository source: ' + sanitizeJulesErrorMessage(err, client.apiKey),
-      session: null,
-      claim: activeClaim
-    };
-  }
-
-  if (!source) {
-    return {
-      success: false,
-      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
-      reason: `No matching Jules source found for repository ${targetRepo.owner}/${targetRepo.repo} with startingBranch '${packet.startingBranch}'.`,
-      session: null,
-      claim: activeClaim
-    };
-  }
 
   // Step 4: Construct safe task prompt with correlation marker
   const correlationMarker = `[claimId: ${activeClaim.claimId}]`;
@@ -262,23 +270,25 @@ export async function dispatchTask({
     const observedAt = currentDate.toISOString();
     const sessionWithObserved = { ...createdSession, observedAt };
 
-    if (createdSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
-      return {
-        success: false,
-        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
-        reason: `Created session ${createdSession.id} returned an unknown or unparseable state ('${createdSession.state}'). Blocking progress.`,
-        session: sessionWithObserved,
-        claim: activeClaim
-      };
-    }
-
-    // Attach session ID to claim
+    // Attach session ID to claim even if state is UNKNOWN so provider work is tracked
     const attachRes = await attachSessionToClaim({
       stateAdapter,
       claimId: activeClaim.claimId,
       sessionId: createdSession.id,
       now: currentDate
     });
+
+    const finalClaim = attachRes.claim || activeClaim;
+
+    if (createdSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+        reason: `Created session ${createdSession.id} returned an unknown or unparseable state ('${createdSession.state}'). Blocking progress.`,
+        session: sessionWithObserved,
+        claim: finalClaim
+      };
+    }
 
     if (attachRes.decisionCode !== CLAIM_CODES.CLAIM_SESSION_ASSOCIATED) {
       return {
@@ -315,43 +325,36 @@ export async function dispatchTask({
   }
 
   const exactMarker = `[claimId: ${activeClaim.claimId}]`;
-  const matchingSessions = existingSessions.filter((s) => {
-    // 1. Verify exact correlation marker in prompt or title
+  const candidateMatches = existingSessions.filter((s) => {
     const promptMatch = typeof s.prompt === 'string' && s.prompt.includes(exactMarker);
     const titleMatch = typeof s.title === 'string' && s.title.includes(exactMarker);
-    if (!promptMatch && !titleMatch) return false;
-
-    // 2. Verify source/repository identity if available on session context
-    const sSource = s.sourceContext?.source;
-    if (sSource && source.name && sSource !== source.name) return false;
-
-    const sRepoOwner = s.sourceContext?.githubRepoContext?.owner || s.githubRepo?.owner;
-    const sRepoName = s.sourceContext?.githubRepoContext?.repo || s.githubRepo?.repo;
-    if (sRepoOwner && sRepoOwner.toLowerCase() !== targetRepo.owner) return false;
-    if (sRepoName && sRepoName.toLowerCase() !== targetRepo.repo) return false;
-
-    // 3. Verify starting branch if available
-    const sBranch = s.sourceContext?.githubRepoContext?.startingBranch;
-    if (sBranch && sBranch !== packet.startingBranch) return false;
-
-    return true;
+    return promptMatch || titleMatch;
   });
 
-  if (matchingSessions.length === 1) {
+  const verifiedMatchingSessions = [];
+  for (const cand of candidateMatches) {
+    let fullSession = cand;
+    try {
+      fullSession = await client.getSession(cand.id);
+    } catch {
+      // If fetching full details fails, skip unverified candidate
+      continue;
+    }
+
+    const sSource = fullSession.sourceContext?.source;
+    if (!sSource || sSource !== source.name) continue;
+
+    const sBranch = fullSession.sourceContext?.githubRepoContext?.startingBranch;
+    if (!sBranch || sBranch !== packet.startingBranch) continue;
+
+    verifiedMatchingSessions.push(fullSession);
+  }
+
+  if (verifiedMatchingSessions.length === 1) {
     const reconciledSession = {
-      ...matchingSessions[0],
+      ...verifiedMatchingSessions[0],
       observedAt: currentDate.toISOString()
     };
-
-    if (reconciledSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
-      return {
-        success: false,
-        decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
-        reason: `Reconciled session (${reconciledSession.id}) returned unknown state ('${reconciledSession.state}'). Blocking progress.`,
-        session: reconciledSession,
-        claim: activeClaim
-      };
-    }
 
     const attachRes = await attachSessionToClaim({
       stateAdapter,
@@ -359,6 +362,18 @@ export async function dispatchTask({
       sessionId: reconciledSession.id,
       now: currentDate
     });
+
+    const finalClaim = attachRes.claim || activeClaim;
+
+    if (reconciledSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+        reason: `Reconciled session (${reconciledSession.id}) returned unknown state ('${reconciledSession.state}'). Blocking progress.`,
+        session: reconciledSession,
+        claim: finalClaim
+      };
+    }
 
     if (attachRes.decisionCode !== CLAIM_CODES.CLAIM_SESSION_ASSOCIATED) {
       return {
@@ -379,17 +394,17 @@ export async function dispatchTask({
     };
   }
 
-  if (matchingSessions.length > 1) {
+  if (verifiedMatchingSessions.length > 1) {
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
-      reason: `Session creation was ambiguous and reconciliation found multiple (${matchingSessions.length}) matching sessions for claim ${activeClaim.claimId}. Blocking to prevent duplicate work.`,
+      reason: `Session creation was ambiguous and reconciliation found multiple (${verifiedMatchingSessions.length}) matching sessions for claim ${activeClaim.claimId}. Blocking to prevent duplicate work.`,
       session: null,
       claim: activeClaim
     };
   }
 
-  // matchingSessions.length === 0
+  // verifiedMatchingSessions.length === 0
   return {
     success: false,
     decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,

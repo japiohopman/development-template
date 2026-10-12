@@ -41,6 +41,16 @@ function sampleConfig(overrides = {}) {
   };
 }
 
+function sampleSelectionResult(overrides = {}) {
+  return {
+    selectedCandidate: { number: 42, title: 'Fix issue 42' },
+    decisionCode: 'CANDIDATE_SELECTED',
+    reason: 'Candidate Issue #42 selected for execution.',
+    safeToDispatch: false,
+    ...overrides
+  };
+}
+
 function samplePacket(overrides = {}) {
   return {
     repository: 'acme/autoloop',
@@ -67,9 +77,58 @@ test('dispatchTask fails when autoloop is disabled', async () => {
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
-  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter });
+  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter, selectionResult: sampleSelectionResult() });
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_DISABLED);
+});
+
+test('dispatchTask fails when requiredConfirmation is empty or missing', async () => {
+  const config = sampleConfig({ requiredConfirmation: '' });
+  const packet = samplePacket();
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const res = await dispatchTask({ config, packet, confirmation: '', stateAdapter, selectionResult: sampleSelectionResult() });
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID);
+});
+
+test('dispatchTask fails when preflight gate evidence is missing completely', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket();
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter });
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED);
+  assert.equal((await stateAdapter.readState()).claims.length, 0);
+});
+
+test('dispatchTask fails setup when source is missing and creates zero claim writes', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket();
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const mockFetch = async (url) => {
+    if (url.includes('/v1alpha/sources')) {
+      return { ok: true, json: async () => ({ sources: [] }) };
+    }
+    throw new Error('Unexpected route: ' + url);
+  };
+
+  const providerClient = new JulesClient({ apiKey: 'my-key', fetchImpl: mockFetch });
+
+  const res = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    selectionResult: sampleSelectionResult(),
+    providerClient
+  });
+
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PROVIDER_FAILED);
+  assert.equal((await stateAdapter.readState()).claims.length, 0);
 });
 
 test('dispatchTask fails when runMode is dry-run', async () => {
@@ -245,6 +304,7 @@ test('dispatchTask creates a durable claim BEFORE provider session creation and 
     packet: samplePacket({ issueNumber: 100, claimId: 'claim-100-test' }),
     confirmation: 'DISPATCH',
     stateAdapter,
+    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 100 } }),
     providerClient
   });
 
@@ -279,6 +339,37 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
       err.name = 'TimeoutError';
       throw err;
     }
+    if (url.includes('/v1alpha/sessions/') && options.method === 'GET') {
+      const id = url.split('/').pop();
+      if (id === 'sess-reconciled-200') {
+        return {
+          ok: true,
+          json: async () => ({
+            id: 'sess-reconciled-200',
+            name: 'sessions/sess-reconciled-200',
+            prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
+            state: 'QUEUED',
+            sourceContext: {
+              source: 'sources/github/acme/autoloop',
+              githubRepoContext: { owner: 'acme', repo: 'autoloop', startingBranch: 'main' }
+            }
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          id: 'sess-foreign-repo',
+          name: 'sessions/sess-foreign',
+          prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
+          state: 'QUEUED',
+          sourceContext: {
+            source: 'sources/github/other/repo',
+            githubRepoContext: { owner: 'other', repo: 'repo', startingBranch: 'main' }
+          }
+        })
+      };
+    }
     if (url.includes('/v1alpha/sessions') && options.method === 'GET') {
       return {
         ok: true,
@@ -288,21 +379,13 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
               id: 'sess-reconciled-200',
               name: 'sessions/sess-reconciled-200',
               prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
-              state: 'QUEUED',
-              sourceContext: {
-                source: 'sources/github/acme/autoloop',
-                githubRepoContext: { owner: 'acme', repo: 'autoloop', startingBranch: 'main' }
-              }
+              state: 'QUEUED'
             },
             {
               id: 'sess-foreign-repo',
               name: 'sessions/sess-foreign',
               prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
-              state: 'QUEUED',
-              sourceContext: {
-                source: 'sources/github/other/repo',
-                githubRepoContext: { owner: 'other', repo: 'repo', startingBranch: 'main' }
-              }
+              state: 'QUEUED'
             }
           ]
         })
@@ -318,6 +401,7 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
+    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 200 } }),
     providerClient
   });
 
@@ -364,6 +448,7 @@ test('dispatchTask blocks session with UNKNOWN normalized state', async () => {
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
+    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 250 } }),
     providerClient
   });
 
@@ -407,6 +492,7 @@ test('dispatchTask handles timeout during session creation and blocks when 0 mat
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
+    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 300 } }),
     providerClient
   });
 
@@ -434,6 +520,22 @@ test('dispatchTask handles timeout during session creation and blocks when multi
     if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
       throw new Error('500 Internal Error');
     }
+    if (url.includes('/v1alpha/sessions/') && options.method === 'GET') {
+      const id = url.split('/').pop();
+      return {
+        ok: true,
+        json: async () => ({
+          id,
+          name: 'sessions/' + id,
+          prompt: 'Prompt [claimId: claim-400-dup]',
+          state: 'QUEUED',
+          sourceContext: {
+            source: 'sources/github/acme/autoloop',
+            githubRepoContext: { owner: 'acme', repo: 'autoloop', startingBranch: 'main' }
+          }
+        })
+      };
+    }
     if (url.includes('/v1alpha/sessions') && options.method === 'GET') {
       return {
         ok: true,
@@ -455,6 +557,7 @@ test('dispatchTask handles timeout during session creation and blocks when multi
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
+    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 400 } }),
     providerClient
   });
 

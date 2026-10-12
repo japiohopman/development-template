@@ -99,19 +99,32 @@ export class JulesClient {
       headers['Content-Type'] = 'application/json';
     }
 
+    const timeoutMs = options.timeoutMs ?? 30000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener('abort', () => controller.abort());
+    }
+
     let response;
     try {
       response = await this.fetchImpl(url, {
         ...options,
         headers,
-        body: options.body && typeof options.body === 'object' ? JSON.stringify(options.body) : options.body
+        body: options.body && typeof options.body === 'object' ? JSON.stringify(options.body) : options.body,
+        redirect: 'error',
+        signal: controller.signal
       });
     } catch (err) {
       const safeMsg = sanitizeJulesErrorMessage(err, this.apiKey);
       const networkError = new Error('Jules API network error: ' + safeMsg);
       networkError.code = 'JULES_NETWORK_ERROR';
-      networkError.isTimeout = err?.name === 'TimeoutError' || err?.code === 'UND_ERR_CONNECT_TIMEOUT';
+      networkError.isTimeout = err?.name === 'AbortError' || err?.name === 'TimeoutError' || err?.code === 'UND_ERR_CONNECT_TIMEOUT';
       throw networkError;
+    } finally {
+      clearTimeout(timeoutId);
     }
 
     if (!response.ok) {
@@ -177,14 +190,17 @@ export class JulesClient {
               ? src.githubRepo.branches
               : (Array.isArray(src?.branches) ? src.branches : null);
 
-            if (branches && branches.length > 0) {
-              const hasBranch = branches.some((b) => {
-                const bName = typeof b === 'string' ? b : (b?.displayName || b?.name || '');
-                return bName.trim() === targetBranch;
-              });
-              if (!hasBranch) {
-                return null;
-              }
+            if (!branches || branches.length === 0) {
+              return null;
+            }
+
+            const hasBranch = branches.some((b) => {
+              const bName = typeof b === 'string' ? b : (b?.displayName || b?.name || '');
+              return bName.trim() === targetBranch;
+            });
+
+            if (!hasBranch) {
+              return null;
             }
           }
           return src;
