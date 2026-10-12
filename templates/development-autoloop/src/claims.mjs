@@ -32,6 +32,48 @@ export const CLAIM_CODES = Object.freeze({
 
 const VALID_STATUSES = new Set(Object.values(CLAIM_STATUS));
 const VALID_RECONCILIATION_STATUSES = new Set(Object.values(RECONCILIATION_STATUS));
+const MAX_CAS_RETRIES = 5;
+
+function invalidStateStoreError(message) {
+  const error = new Error(message);
+  error.code = 'INVALID_STATE_STORE';
+  return error;
+}
+
+function validateStateSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return { valid: false, reason: 'State snapshot must be an object.' };
+  }
+  if (snapshot.head !== null && (typeof snapshot.head !== 'string' || !snapshot.head.trim())) {
+    return { valid: false, reason: 'State snapshot must include a valid head SHA or null for an uninitialized store.' };
+  }
+  if (!Array.isArray(snapshot.claims)) {
+    return { valid: false, reason: 'State snapshot must include a claims array; refusing to treat malformed state as empty.' };
+  }
+  const seenIds = new Set();
+  for (const claim of snapshot.claims) {
+    const checked = validateClaimRecord(claim);
+    if (!checked.valid) {
+      return { valid: false, reason: 'State snapshot contains a malformed claim record (' + (claim?.claimId ?? 'unknown') + ').' };
+    }
+    if (seenIds.has(claim.claimId)) {
+      return { valid: false, reason: 'State snapshot contains duplicate claimId ' + claim.claimId + '.' };
+    }
+    seenIds.add(claim.claimId);
+  }
+  return { valid: true };
+}
+
+function sameClaimIntent(actual, expected) {
+  if (!actual || !expected) return false;
+  const fields = ['schemaVersion', 'claimId', 'issueNumber', 'owner', 'provider', 'sessionId',
+    'createdAt', 'expiresAt', 'status', 'reconciliationStatus', 'updatedAt'];
+  if (!fields.every((field) => actual[field] === expected[field])) return false;
+  const actualRepo = normalizeRepositoryIdentity(actual.repository).repository;
+  const expectedRepo = normalizeRepositoryIdentity(expected.repository).repository;
+  return Boolean(actualRepo && expectedRepo &&
+    actualRepo.owner === expectedRepo.owner && actualRepo.repo === expectedRepo.repo);
+}
 
 function pointer(segments) {
   if (!segments || segments.length === 0) return '/';
@@ -182,24 +224,22 @@ export function isClaimActive(claim, now = new Date()) {
     return { active: true, expired: false, reason: 'Claim record is invalid/malformed.' };
   }
 
-  if (claim.status !== CLAIM_STATUS.ACTIVE) {
-    return { active: false, expired: false };
-  }
-
+  // Reconciliation is the only release boundary. An EXPIRED, RELEASED, or
+  // RECLAIMED record that remains unreconciled must still block new work.
   if (claim.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED) {
     return { active: false, expired: false };
   }
 
   const nowMs = new Date(now).getTime();
   const expiresAtMs = Date.parse(claim.expiresAt);
-  const expired = nowMs >= expiresAtMs;
+  const expired = claim.status === CLAIM_STATUS.EXPIRED || nowMs >= expiresAtMs;
 
   return {
     active: true,
     expired,
     reason: expired
       ? 'Claim expired at ' + claim.expiresAt + ' but has not been reconciled.'
-      : 'Claim is active until ' + claim.expiresAt + '.'
+      : 'Claim is active until ' + claim.expiresAt + ' and has not been reconciled.'
   };
 }
 
@@ -305,33 +345,58 @@ export class GitHubStateBranchAdapter {
   }
 
   async readState() {
+    let refRes;
     try {
-      const refRes = await this.octokit.request('GET /repos/{owner}/{repo}/git/ref/{ref}', {
+      refRes = await this.octokit.request('GET /repos/{owner}/{repo}/git/ref/{ref}', {
         owner: this.owner,
         repo: this.repo,
         ref: 'heads/' + this.stateBranch
       });
+    } catch (err) {
+      // Only a missing branch means an uninitialized (empty) state store.
+      // A missing claims.json on an existing branch is corruption, not emptiness.
+      if (err.status === 404) return { head: null, claims: [] };
+      throw err;
+    }
 
-      const headSha = refRes.data.object.sha;
+    const headSha = refRes?.data?.object?.sha;
+    if (typeof headSha !== 'string' || !headSha.trim()) {
+      throw invalidStateStoreError('State branch ref returned no commit SHA.');
+    }
 
-      const contentRes = await this.octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+    let contentRes;
+    try {
+      contentRes = await this.octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
         owner: this.owner,
         repo: this.repo,
         path: 'claims.json',
         ref: this.stateBranch
       });
-
-      const content = Buffer.from(contentRes.data.content, 'base64').toString('utf8');
-      const parsed = JSON.parse(content);
-      const claims = Array.isArray(parsed?.claims) ? parsed.claims : [];
-
-      return { head: headSha, claims };
     } catch (err) {
       if (err.status === 404) {
-        return { head: null, claims: [] };
+        throw invalidStateStoreError('State branch exists but claims.json is missing.');
       }
       throw err;
     }
+
+    let parsed;
+    try {
+      const encodedContent = contentRes?.data?.content;
+      if (typeof encodedContent !== 'string') {
+        throw invalidStateStoreError('Persisted claims.json has no encoded content.');
+      }
+      const content = Buffer.from(encodedContent, 'base64').toString('utf8');
+      parsed = JSON.parse(content);
+    } catch (err) {
+      if (err.code === 'INVALID_STATE_STORE') throw err;
+      throw invalidStateStoreError('Persisted claims.json is not valid JSON.');
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.claims)) {
+      throw invalidStateStoreError('Persisted claims.json must be an object containing a claims array.');
+    }
+
+    return { head: headSha, claims: parsed.claims };
   }
 
   async commitStateChange(expectedHead, newClaims) {
@@ -390,6 +455,16 @@ export class GitHubStateBranchAdapter {
         return { success: false, head: currentRef.data.object.sha, reason: 'CAS_CONFLICT', ambiguous: false };
       }
 
+      const parentCommit = await this.octokit.request('GET /repos/{owner}/{repo}/git/commits/{commit_sha}', {
+        owner: this.owner,
+        repo: this.repo,
+        commit_sha: expectedHead
+      });
+      const baseTreeSha = parentCommit?.data?.tree?.sha;
+      if (typeof baseTreeSha !== 'string' || !baseTreeSha.trim()) {
+        throw invalidStateStoreError('Expected state head did not resolve to a Git tree SHA.');
+      }
+
       const blobRes = await this.octokit.request('POST /repos/{owner}/{repo}/git/blobs', {
         owner: this.owner,
         repo: this.repo,
@@ -400,7 +475,7 @@ export class GitHubStateBranchAdapter {
       const treeRes = await this.octokit.request('POST /repos/{owner}/{repo}/git/trees', {
         owner: this.owner,
         repo: this.repo,
-        base_tree: expectedHead,
+        base_tree: baseTreeSha,
         tree: [{ path: 'claims.json', mode: '100644', type: 'blob', sha: blobRes.data.sha }]
       });
 
@@ -469,6 +544,17 @@ export async function acquireClaim({
     };
   }
 
+  if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > MAX_CAS_RETRIES) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'maxRetries must be an integer between 0 and ' + MAX_CAS_RETRIES + '.',
+      nextAction: 'Use a finite retry limit within the documented hard cap.'
+    };
+  }
+
   const repoCheck = normalizeRepositoryIdentity(repository);
   if (!repoCheck.valid) {
     return {
@@ -513,23 +599,32 @@ export async function acquireClaim({
     : 'claim-' + targetIssueNum + '-' + currentDate.getTime() + '-' + Math.random().toString(36).substring(2, 8);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const { head, claims } = await stateAdapter.readState();
-    const existingClaims = Array.isArray(claims) ? claims : [];
-
-    // Validate all records in state before proceeding
-    for (const item of existingClaims) {
-      const check = validateClaimRecord(item);
-      if (!check.valid) {
-        return {
-          claim: null,
-          decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
-          persistenceConfirmed: false,
-          safeToDispatch: false,
-          reason: 'State store contains a malformed claim record (claimId: ' + (item?.claimId ?? 'unknown') + ').',
-          nextAction: 'Repair or reconcile invalid claim state records in the state branch.'
-        };
-      }
+    let snapshot;
+    try {
+      snapshot = await stateAdapter.readState();
+    } catch (err) {
+      const invalid = err?.code === 'INVALID_STATE_STORE';
+      return {
+        claim: null,
+        decisionCode: invalid ? CLAIM_CODES.CLAIM_INVALID_STATE : CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+        persistenceConfirmed: false,
+        safeToDispatch: false,
+        reason: 'Could not read authoritative claim state: ' + String(err?.message || err),
+        nextAction: invalid ? 'Repair the malformed state store before retrying.' : 'Restore state-store access and retry after read-only reconciliation.'
+      };
     }
+    const snapshotCheck = validateStateSnapshot(snapshot);
+    if (!snapshotCheck.valid) {
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        safeToDispatch: false,
+        reason: snapshotCheck.reason,
+        nextAction: 'Repair or reconcile invalid state records before retrying.'
+      };
+    }
+    const { head, claims: existingClaims } = snapshot;
 
     // Search for active/unreconciled claim for target Issue
     const targetRepo = repoCheck.repository;
@@ -560,6 +655,18 @@ export async function acquireClaim({
           nextAction: 'Wait for active claim ' + c.claimId + ' to complete or be reconciled.'
         };
       }
+    }
+
+    const collidingClaimId = existingClaims.find((c) => c.claimId === targetClaimId);
+    if (collidingClaimId) {
+      return {
+        claim: collidingClaimId,
+        decisionCode: CLAIM_CODES.CLAIM_ALREADY_EXISTS,
+        persistenceConfirmed: true,
+        safeToDispatch: false,
+        reason: 'claimId ' + targetClaimId + ' already exists in claim history and cannot be reused.',
+        nextAction: 'Choose a new stable claim ID; do not reuse historical IDs.'
+      };
     }
 
     const newClaim = {
@@ -605,10 +712,33 @@ export async function acquireClaim({
     }
 
     if (commitResult.ambiguous || commitResult.reason === 'STORAGE_WRITE_ERROR') {
-      // Ambiguous write or write error: reconcile by exact claimId read-back
-      const { claims: freshClaims } = await stateAdapter.readState();
-      const found = (Array.isArray(freshClaims) ? freshClaims : []).find((c) => c && c.claimId === targetClaimId);
-      if (found && validateClaimRecord(found).valid) {
+      // Ambiguous write or write error: reconcile by exact claimId and immutable intent.
+      let freshSnapshot;
+      try {
+        freshSnapshot = await stateAdapter.readState();
+      } catch (err) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+          persistenceConfirmed: false,
+          safeToDispatch: false,
+          reason: 'Ambiguous claim write could not be reconciled because the state read failed: ' + String(err?.message || err),
+          nextAction: 'Do not create provider work; restore state access and reconcile this exact claim ID.'
+        };
+      }
+      const freshCheck = validateStateSnapshot(freshSnapshot);
+      if (!freshCheck.valid) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+          persistenceConfirmed: false,
+          safeToDispatch: false,
+          reason: 'Ambiguous claim write read-back returned invalid state: ' + freshCheck.reason,
+          nextAction: 'Stop and repair the authoritative state store before retrying.'
+        };
+      }
+      const found = freshSnapshot.claims.find((c) => c.claimId === targetClaimId);
+      if (found && sameClaimIntent(found, newClaim)) {
         return {
           claim: found,
           decisionCode: CLAIM_CODES.CLAIM_ACQUIRED,
@@ -661,10 +791,21 @@ export async function inspectClaim({ stateAdapter, claimId, now = new Date() }) 
   }
 
   const targetId = claimId.trim();
-  const { claims } = await stateAdapter.readState();
-  const existingClaims = Array.isArray(claims) ? claims : [];
+  let snapshot;
+  try {
+    snapshot = await stateAdapter.readState();
+  } catch (err) {
+    return { found: false, valid: false, claim: null,
+      decisionCode: err?.code === 'INVALID_STATE_STORE' ? CLAIM_CODES.CLAIM_INVALID_STATE : CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+      reason: 'Could not read authoritative claim state: ' + String(err?.message || err) };
+  }
+  const snapshotCheck = validateStateSnapshot(snapshot);
+  if (!snapshotCheck.valid) {
+    return { found: false, valid: false, claim: null, decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE, reason: snapshotCheck.reason };
+  }
+  const existingClaims = snapshot.claims;
 
-  const found = existingClaims.find((c) => c && c.claimId === targetId);
+  const found = existingClaims.find((c) => c.claimId === targetId);
   if (!found) {
     return {
       found: false,
@@ -777,6 +918,17 @@ export async function reconcileAndRecoverClaim({
     };
   }
 
+  if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > MAX_CAS_RETRIES) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'maxRetries must be an integer between 0 and ' + MAX_CAS_RETRIES + '.',
+      nextAction: 'Use a finite retry limit within the documented hard cap.'
+    };
+  }
+
   if (typeof claimId !== 'string' || !claimId.trim()) {
     return {
       claim: null,
@@ -816,10 +968,34 @@ export async function reconcileAndRecoverClaim({
   const currentDate = new Date(now);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const { head, claims } = await stateAdapter.readState();
-    const existingClaims = Array.isArray(claims) ? claims : [];
+    let snapshot;
+    try {
+      snapshot = await stateAdapter.readState();
+    } catch (err) {
+      const invalid = err?.code === 'INVALID_STATE_STORE';
+      return {
+        claim: null,
+        decisionCode: invalid ? CLAIM_CODES.CLAIM_INVALID_STATE : CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+        persistenceConfirmed: false,
+        safeToDispatch: false,
+        reason: 'Could not read authoritative claim state: ' + String(err?.message || err),
+        nextAction: invalid ? 'Repair the malformed state store before retrying.' : 'Restore state-store access and retry after read-only reconciliation.'
+      };
+    }
+    const snapshotCheck = validateStateSnapshot(snapshot);
+    if (!snapshotCheck.valid) {
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        safeToDispatch: false,
+        reason: snapshotCheck.reason,
+        nextAction: 'Repair or reconcile invalid state records before retrying.'
+      };
+    }
+    const { head, claims: existingClaims } = snapshot;
 
-    const foundIndex = existingClaims.findIndex((c) => c && c.claimId === targetId);
+    const foundIndex = existingClaims.findIndex((c) => c.claimId === targetId);
     if (foundIndex === -1) {
       return {
         claim: null,
@@ -844,14 +1020,45 @@ export async function reconcileAndRecoverClaim({
       };
     }
 
-    if (currentClaim.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED && currentClaim.status === targetStatus) {
+    if (currentClaim.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED) {
+      if (currentClaim.status === targetStatus) {
+        return {
+          claim: currentClaim,
+          decisionCode: CLAIM_CODES.CLAIM_RECOVERED,
+          persistenceConfirmed: true,
+          safeToDispatch: false,
+          reason: 'Claim ID ' + targetId + ' was already reconciled and updated to ' + targetStatus + '.',
+          nextAction: 'Claim is reconciled.'
+        };
+      }
       return {
         claim: currentClaim,
-        decisionCode: CLAIM_CODES.CLAIM_RECOVERED,
+        decisionCode: CLAIM_CODES.CLAIM_RECOVERY_BLOCKED,
         persistenceConfirmed: true,
         safeToDispatch: false,
-        reason: 'Claim ID ' + targetId + ' was already reconciled and updated to ' + targetStatus + '.',
-        nextAction: 'Claim is reconciled.'
+        reason: 'Claim ID ' + targetId + ' is already reconciled; its terminal outcome cannot be rewritten.',
+        nextAction: 'Preserve the existing audit record and inspect the claim history.'
+      };
+    }
+
+    if (currentDate.getTime() < Date.parse(currentClaim.expiresAt)) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_RECOVERY_BLOCKED,
+        persistenceConfirmed: true,
+        safeToDispatch: false,
+        reason: 'Claim ID ' + targetId + ' has not expired; recovery cannot release an unexpired claim.',
+        nextAction: 'Do not reclaim this Issue while its claim lease is still valid.'
+      };
+    }
+    if (currentClaim.status !== CLAIM_STATUS.ACTIVE && currentClaim.status !== CLAIM_STATUS.EXPIRED) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_RECOVERY_BLOCKED,
+        persistenceConfirmed: true,
+        safeToDispatch: false,
+        reason: 'Claim ID ' + targetId + ' has an inconsistent status and cannot be safely recovered.',
+        nextAction: 'Inspect and manually reconcile this exact claim before recovery.'
       };
     }
 
@@ -863,7 +1070,8 @@ export async function reconcileAndRecoverClaim({
       metadata: {
         ...(currentClaim.metadata || {}),
         reconciledAt: currentDate.toISOString(),
-        reconciliationSummary: evidence?.summary || 'verified'
+        reconciliationSummary: evidence?.summary || 'verified',
+        reconciliationEvidence: JSON.parse(JSON.stringify(evidence))
       }
     };
 
