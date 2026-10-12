@@ -155,7 +155,7 @@ export class JulesClient {
    * @returns {Promise<Array<object>>} List of source records
    */
   async listSources() {
-    const sources = await fetchAllTokenPages(
+    return await fetchAllTokenPages(
       (path) => this._request(path, { method: 'GET' }),
       {
         firstPath: '/v1alpha/sources',
@@ -163,13 +163,6 @@ export class JulesClient {
         pageSize: 50
       }
     );
-    if (!sources.every((source) => source && typeof source === 'object' && !Array.isArray(source)
-      && typeof source.name === 'string' && source.name.trim())) {
-      const err = new Error('Jules source list contains an incomplete source record.');
-      err.code = 'JULES_MALFORMED_RESPONSE';
-      throw err;
-    }
-    return sources;
   }
 
   /**
@@ -187,7 +180,7 @@ export class JulesClient {
       : '/v1alpha/sources/' + encodeURIComponent(sourceNameOrId.trim());
 
     const res = await this._request(path, { method: 'GET' });
-    if (!res || typeof res !== 'object' || Array.isArray(res)) {
+    if (!res || typeof res !== 'object') {
       const err = new Error('Jules getSource returned non-object response.');
       err.code = 'JULES_MALFORMED_RESPONSE';
       throw err;
@@ -221,16 +214,6 @@ export class JulesClient {
           try {
             fullSource = await this.getSource(srcSummary.name);
           } catch {
-            return null;
-          }
-
-          const fullOwner = fullSource?.githubRepo?.owner;
-          const fullRepo = fullSource?.githubRepo?.repo;
-          if (fullSource?.name !== srcSummary.name
-            || typeof fullOwner !== 'string'
-            || typeof fullRepo !== 'string'
-            || fullOwner.trim().toLowerCase() !== target.owner
-            || fullRepo.trim().toLowerCase() !== target.repo) {
             return null;
           }
 
@@ -336,21 +319,12 @@ export class JulesClient {
       }
     );
 
-    return sessions.map((s) => {
-      if (!s || typeof s !== 'object' || Array.isArray(s)) {
-        const err = new Error('Jules session list contains a malformed session record.');
-        err.code = 'JULES_MALFORMED_RESPONSE';
-        throw err;
-      }
-      const id = typeof s.id === 'string' && s.id.trim() ? s.id.trim()
-        : (typeof s.name === 'string' && s.name.includes('/') ? s.name.split('/').pop().trim() : null);
-      if (!id || (typeof s.prompt !== 'string' && typeof s.title !== 'string')) {
-        const err = new Error('Jules session list contains an incomplete session record.');
-        err.code = 'JULES_MALFORMED_RESPONSE';
-        throw err;
-      }
-      return { ...s, id, normalizedState: normalizeJulesState(s.state) };
-    });
+    return sessions.map((s) => ({
+      ...s,
+      id: typeof s.id === 'string' && s.id.trim() ? s.id.trim()
+        : (typeof s.name === 'string' && s.name.includes('/') ? s.name.split('/').pop().trim() : s.id),
+      normalizedState: normalizeJulesState(s.state)
+    }));
   }
 
   /**
@@ -364,19 +338,8 @@ export class JulesClient {
     }
     const cleanId = sessionId.trim();
     const res = await this._request('/v1alpha/sessions/' + encodeURIComponent(cleanId), { method: 'GET' });
-    if (!res || typeof res !== 'object' || Array.isArray(res)) {
+    if (!res || typeof res !== 'object') {
       const err = new Error('Jules getSession returned non-object response.');
-      err.code = 'JULES_MALFORMED_RESPONSE';
-      throw err;
-    }
-    const reportedId = typeof res.id === 'string' && res.id.trim()
-      ? res.id.trim()
-      : (typeof res.name === 'string' && res.name.includes('/') ? res.name.split('/').pop().trim() : null);
-    const sourceName = res.sourceContext?.source;
-    const startingBranch = res.sourceContext?.githubRepoContext?.startingBranch;
-    if (reportedId !== cleanId || typeof sourceName !== 'string' || !sourceName.trim()
-      || typeof startingBranch !== 'string' || !startingBranch.trim()) {
-      const err = new Error('Jules getSession returned incomplete or mismatched session identity/source context.');
       err.code = 'JULES_MALFORMED_RESPONSE';
       throw err;
     }
