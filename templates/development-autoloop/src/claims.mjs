@@ -102,9 +102,10 @@ function sortDiagnostics(errors) {
 }
 
 function isValidIsoTimestamp(str) {
-  if (typeof str !== 'string' || !str.trim()) return false;
-  const time = Date.parse(str);
-  return Number.isFinite(time);
+  if (typeof str !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:Z|[+-]\\d{2}:\\d{2})$/.test(str)) {
+    return false;
+  }
+  return Number.isFinite(Date.parse(str));
 }
 
 /**
@@ -162,9 +163,8 @@ export function validateClaimRecord(record) {
     errors.push(diagnostic(['repository'], 'INVALID_REPOSITORY_IDENTITY', 'repository must specify valid owner and repo strings.'));
   }
 
-  const issueNum = Number(record.issueNumber);
-  if (!Number.isInteger(issueNum) || issueNum < 1) {
-    errors.push(diagnostic(['issueNumber'], 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer.'));
+  if (typeof record.issueNumber !== 'number' || !Number.isInteger(record.issueNumber) || record.issueNumber < 1) {
+    errors.push(diagnostic(['issueNumber'], 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer number.'));
   }
 
   if (typeof record.owner !== 'string' || !record.owner.trim()) {
@@ -175,8 +175,8 @@ export function validateClaimRecord(record) {
     errors.push(diagnostic(['provider'], 'INVALID_PROVIDER', 'provider must be a non-empty string.'));
   }
 
-  if (record.sessionId !== null && record.sessionId !== undefined && (typeof record.sessionId !== 'string' || !record.sessionId.trim())) {
-    errors.push(diagnostic(['sessionId'], 'INVALID_SESSION_ID', 'sessionId must be null or a non-empty string.'));
+  if (record.sessionId !== null && (typeof record.sessionId !== 'string' || !record.sessionId.trim())) {
+    errors.push(diagnostic(['sessionId'], 'INVALID_SESSION_ID', 'sessionId must be explicitly null or a non-empty string.'));
   }
 
   if (!isValidIsoTimestamp(record.createdAt)) {
@@ -607,7 +607,28 @@ export async function acquireClaim({
   }
 
   const currentDate = new Date(now);
-  const ttlMs = Math.max(1, Number(ttlMinutes) || 45) * 60 * 1000;
+  const requestedTtlMinutes = Number(ttlMinutes);
+  if (!Number.isFinite(currentDate.getTime())) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'now must be a valid timestamp.',
+      nextAction: 'Provide a valid timestamp and retry.'
+    };
+  }
+  if (!Number.isFinite(requestedTtlMinutes) || requestedTtlMinutes <= 0) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'ttlMinutes must be a finite positive number.',
+      nextAction: 'Provide a valid positive claim lease duration.'
+    };
+  }
+  const ttlMs = Math.max(1, requestedTtlMinutes) * 60 * 1000;
   const expiresAtDate = new Date(currentDate.getTime() + ttlMs);
 
   const targetClaimId = typeof claimId === 'string' && claimId.trim()
@@ -982,6 +1003,16 @@ export async function reconcileAndRecoverClaim({
   }
 
   const currentDate = new Date(now);
+  if (!Number.isFinite(currentDate.getTime())) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'now must be a valid timestamp.',
+      nextAction: 'Provide a valid timestamp and retry recovery.'
+    };
+  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let snapshot;
