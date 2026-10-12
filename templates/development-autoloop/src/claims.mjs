@@ -945,6 +945,10 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     if (!domain.valid.has(status)) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' has an unknown/unsafe status (' + (status || 'unspecified') + ').' };
     }
+    if (domain.key === 'sessions' && status !== 'none'
+      && (typeof item.sessionId !== 'string' || !item.sessionId.trim())) {
+      return { verified: false, reason: 'Terminal provider-session evidence must identify the exact session inspected.' };
+    }
     if (typeof item.source !== 'string' || !item.source.trim()) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must identify the source inspected.' };
     }
