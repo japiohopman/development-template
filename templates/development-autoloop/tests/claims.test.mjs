@@ -35,6 +35,38 @@ function validSampleClaim(overrides = {}) {
   };
 }
 
+function verifiedEvidence({
+  claimId = 'claim-101-20260331-abc',
+  repository = 'acme/autoloop',
+  issueNumber = 101,
+  verifiedBy = 'test-fixture:reconciliation',
+  verifiedAt = '2026-03-31T09:59:00.000Z',
+  sessions = { status: 'terminal' },
+  branches = { status: 'clean' },
+  pullRequests = { status: 'merged' },
+  summary = 'verified test evidence'
+} = {}) {
+  const observedAt = new Date(Date.parse(verifiedAt) - 60_000).toISOString();
+  const domain = (key, values) => ({
+    verified: true,
+    source: 'mock:' + key + '-inventory',
+    observedAt,
+    ...values
+  });
+  return {
+    verified: true,
+    claimId,
+    repository,
+    issueNumber,
+    verifiedBy,
+    verifiedAt,
+    sessions: domain('session', sessions),
+    branches: domain('branch', branches),
+    pullRequests: domain('pull-request', pullRequests),
+    summary
+  };
+}
+
 test('normalizeRepositoryIdentity handles string and object inputs', () => {
   assert.deepEqual(
     normalizeRepositoryIdentity('Acme/AutoLoop').repository,
@@ -327,32 +359,27 @@ test('concurrency / race test: two simultaneous acquisition attempts for the sam
   assert.equal(finalState.claims[0].issueNumber, 99);
 });
 
-test('validateReconciliationEvidence enforces complete evidence across sessions, branches, and PRs', () => {
+test('validateReconciliationEvidence requires scoped, sourced, timestamped evidence for all domains', () => {
   assert.equal(validateReconciliationEvidence(null).verified, false);
   assert.equal(validateReconciliationEvidence({ verified: false }).verified, false);
 
-  const missingBranch = {
-    verified: true,
-    sessions: { status: 'terminal' },
-    pullRequests: { status: 'merged' }
-  };
+  const validEvidence = verifiedEvidence();
+  const missingBranch = { ...validEvidence };
+  delete missingBranch.branches;
   assert.equal(validateReconciliationEvidence(missingBranch).verified, false);
 
-  const activeSession = {
-    verified: true,
-    sessions: { status: 'IN_PROGRESS' },
-    branches: { status: 'clean' },
-    pullRequests: { status: 'none' }
-  };
+  const activeSession = verifiedEvidence({ sessions: { status: 'IN_PROGRESS' } });
   assert.equal(validateReconciliationEvidence(activeSession).verified, false);
 
-  const completeEvidence = {
-    verified: true,
-    sessions: { status: 'terminal' },
-    branches: { status: 'clean' },
-    pullRequests: { status: 'merged' }
-  };
-  assert.equal(validateReconciliationEvidence(completeEvidence).verified, true);
+  const missingProvenance = verifiedEvidence();
+  delete missingProvenance.sessions.source;
+  assert.equal(validateReconciliationEvidence(missingProvenance).verified, false);
+
+  const missingTimestamp = verifiedEvidence();
+  delete missingTimestamp.branches.observedAt;
+  assert.equal(validateReconciliationEvidence(missingTimestamp).verified, false);
+
+  assert.equal(validateReconciliationEvidence(validEvidence).verified, true);
 });
 
 test('reconcileAndRecoverClaim requires explicit verified reconciliation evidence and uses CAS', async () => {
@@ -379,13 +406,14 @@ test('reconcileAndRecoverClaim requires explicit verified reconciliation evidenc
   assert.equal(blockedRes.persistenceConfirmed, false);
 
   // Attempt recovery with complete evidence succeeds via CAS
-  const completeEvidence = {
-    verified: true,
+  const completeEvidence = verifiedEvidence({
+    claimId: 'stale-claim-99',
+    issueNumber: 99,
     sessions: { status: 'terminal' },
     branches: { status: 'deleted' },
     pullRequests: { status: 'merged' },
     summary: 'PR #12 merged and session terminal'
-  };
+  });
 
   const recoverRes = await reconcileAndRecoverClaim({
     stateAdapter,
@@ -475,13 +503,15 @@ test('fixture: crash-before-provider-call stale claim requires evidence reconcil
   const rec = await reconcileAndRecoverClaim({
     stateAdapter,
     claimId: c1.claim.claimId,
-    evidence: {
-      verified: true,
+    evidence: verifiedEvidence({
+      claimId: c1.claim.claimId,
+      issueNumber: 301,
+      verifiedAt: '2026-03-31T10:39:00.000Z',
       sessions: { status: 'none' },
       branches: { status: 'none' },
       pullRequests: { status: 'none' },
       summary: 'Verified crash before provider call; no artifacts created'
-    },
+    }),
     targetStatus: CLAIM_STATUS.RECLAIMED,
     now: t1
   });
@@ -690,12 +720,7 @@ test('recovery target cannot be EXPIRED because expiry is not a reconciled relea
   const result = await reconcileAndRecoverClaim({
     stateAdapter,
     claimId: 'target-status-check',
-    evidence: {
-      verified: true,
-      sessions: { status: 'none' },
-      branches: { status: 'none' },
-      pullRequests: { status: 'none' }
-    },
+    evidence: verifiedEvidence(),
     targetStatus: CLAIM_STATUS.EXPIRED
   });
   assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
@@ -759,13 +784,14 @@ test('ambiguous recovery write is confirmed only when exact reconciliation evide
   });
   const stateAdapter = new InMemoryStateAdapter({ claims: [staleClaim], head: 'v1' });
   stateAdapter.injectedAmbiguousWriteOnce = true;
-  const evidence = {
-    verified: true,
-    sessions: { status: 'none', source: 'mock-session-inventory' },
-    branches: { status: 'none', source: 'mock-branch-inventory' },
-    pullRequests: { status: 'none', source: 'mock-pr-inventory' },
+  const evidence = verifiedEvidence({
+    claimId: staleClaim.claimId,
+    issueNumber: 404,
+    sessions: { status: 'none' },
+    branches: { status: 'none' },
+    pullRequests: { status: 'none' },
     summary: 'Mocked exact-ID reconciliation evidence'
-  };
+  });
   const result = await reconcileAndRecoverClaim({
     stateAdapter,
     claimId: staleClaim.claimId,
@@ -889,15 +915,81 @@ test('recovery rejects an invalid clock value without changing the claim', async
   const result = await reconcileAndRecoverClaim({
     stateAdapter,
     claimId: staleClaim.claimId,
-    evidence: {
-      verified: true,
-      sessions: { status: 'none' },
-      branches: { status: 'none' },
-      pullRequests: { status: 'none' }
-    },
+    evidence: verifiedEvidence(),
     now: 'not-a-timestamp'
   });
   assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
+  assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
+});
+
+
+test('recovery rejects evidence scoped to a different claim, repository, or Issue', async () => {
+  const staleClaim = validSampleClaim({
+    claimId: 'scoped-target-777',
+    issueNumber: 777,
+    createdAt: '2026-03-31T07:00:00.000Z',
+    expiresAt: '2026-03-31T07:45:00.000Z',
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [staleClaim], head: 'v1' });
+  const base = {
+    stateAdapter,
+    claimId: staleClaim.claimId,
+    targetStatus: CLAIM_STATUS.RECLAIMED,
+    now: new Date('2026-03-31T10:00:00.000Z')
+  };
+  const evidenceCases = [
+    verifiedEvidence({ claimId: 'other-claim', issueNumber: 777 }),
+    verifiedEvidence({ claimId: staleClaim.claimId, issueNumber: 778 }),
+    verifiedEvidence({ claimId: staleClaim.claimId, repository: 'other/repository', issueNumber: 777 })
+  ];
+  for (const evidence of evidenceCases) {
+    const result = await reconcileAndRecoverClaim({ ...base, evidence });
+    assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_RECOVERY_BLOCKED);
+    assert.equal(result.safeToDispatch, false);
+  }
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
+  assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
+});
+
+test('recovery rejects evidence that is older than five minutes or timestamped in the future', async () => {
+  const staleClaim = validSampleClaim({
+    claimId: 'evidence-age-claim',
+    issueNumber: 778,
+    createdAt: '2026-03-31T07:00:00.000Z',
+    expiresAt: '2026-03-31T07:45:00.000Z',
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [staleClaim], head: 'v1' });
+  const now = new Date('2026-03-31T10:00:00.000Z');
+  const staleEvidence = verifiedEvidence({
+    claimId: staleClaim.claimId,
+    issueNumber: staleClaim.issueNumber,
+    verifiedAt: '2026-03-31T09:50:00.000Z',
+    sessions: { status: 'none' },
+    branches: { status: 'none' },
+    pullRequests: { status: 'none' }
+  });
+  const futureEvidence = verifiedEvidence({
+    claimId: staleClaim.claimId,
+    issueNumber: staleClaim.issueNumber,
+    verifiedAt: '2026-03-31T10:01:00.000Z',
+    sessions: { status: 'none' },
+    branches: { status: 'none' },
+    pullRequests: { status: 'none' }
+  });
+  for (const evidence of [staleEvidence, futureEvidence]) {
+    const result = await reconcileAndRecoverClaim({
+      stateAdapter, claimId: staleClaim.claimId, evidence,
+      targetStatus: CLAIM_STATUS.RECLAIMED, now
+    });
+    assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_RECOVERY_BLOCKED);
+  }
   const snapshot = await stateAdapter.readState();
   assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
   assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
