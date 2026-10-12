@@ -49,8 +49,13 @@ function verifiedEvidence({
   const observedAt = new Date(Date.parse(verifiedAt) - 60_000).toISOString();
   const domain = (key, values) => ({
     verified: true,
+    repository,
+    issueNumber,
     source: 'mock:' + key + '-inventory',
     observedAt,
+    ...(key === 'session'
+      ? { sessionId: values.status === 'none' ? null : (values.sessionId ?? 'mock-session-reference') }
+      : {}),
     ...values
   });
   return {
@@ -378,6 +383,18 @@ test('validateReconciliationEvidence requires scoped, sourced, timestamped evide
   const missingTimestamp = verifiedEvidence();
   delete missingTimestamp.branches.observedAt;
   assert.equal(validateReconciliationEvidence(missingTimestamp).verified, false);
+
+  const wrongDomainRepository = verifiedEvidence();
+  wrongDomainRepository.pullRequests.repository = 'another/repository';
+  assert.equal(validateReconciliationEvidence(wrongDomainRepository).verified, false);
+
+  const wrongDomainIssue = verifiedEvidence();
+  wrongDomainIssue.branches.issueNumber = 102;
+  assert.equal(validateReconciliationEvidence(wrongDomainIssue).verified, false);
+
+  const terminalSessionWithoutId = verifiedEvidence();
+  delete terminalSessionWithoutId.sessions.sessionId;
+  assert.equal(validateReconciliationEvidence(terminalSessionWithoutId).verified, false);
 
   assert.equal(validateReconciliationEvidence(validEvidence).verified, true);
 });
