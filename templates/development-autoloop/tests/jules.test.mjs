@@ -235,7 +235,7 @@ test('JulesClient fails closed when authoritative Source details disagree with l
   const client = new JulesClient({
     apiKey: 'test-key',
     fetchImpl: async (url) => {
-      if (url.includes('/v1alpha/sources/github/acme/project')) {
+      if (!url.endsWith('/v1alpha/sources')) {
         return { ok: true, json: async () => ({
           name: 'sources/github/acme/project',
           githubRepo: { owner: 'other-owner', repo: 'project', branches: ['main'] }
@@ -253,7 +253,7 @@ test('JulesClient refuses to trust a list summary when full Source details are i
   const client = new JulesClient({
     apiKey: 'test-key',
     fetchImpl: async (url) => {
-      if (url.includes('/v1alpha/sources/github/acme/project')) {
+      if (!url.endsWith('/v1alpha/sources')) {
         return { ok: true, json: async () => ({ name: 'sources/github/acme/project' }) };
       }
       return { ok: true, json: async () => ({
@@ -305,5 +305,25 @@ test('JulesClient refuses a partial inventory if a later source page fails', asy
   await assert.rejects(
     () => client.listSources(),
     (err) => err.code === 'JULES_HTTP_ERROR' && err.status === 503
+  );
+});
+
+
+test('JulesClient rejects a successful but incomplete create-session response', async () => {
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async (url, options) => ({
+      ok: true,
+      json: async () => options.method === 'POST' ? { state: 'QUEUED' } : {}
+    })
+  });
+  await assert.rejects(
+    () => client.createSession({
+      sourceName: 'sources/github/acme/project',
+      startingBranch: 'main',
+      prompt: 'Task [claimId: claim-create-response]',
+      title: 'Task [claimId: claim-create-response]'
+    }),
+    (err) => err.code === 'JULES_MALFORMED_RESPONSE'
   );
 });
