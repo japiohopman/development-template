@@ -269,7 +269,10 @@ export async function dispatchTask({
       providerSessionId: createdSession.id,
       rawProviderState: createdSession.state ?? null,
       normalizedProviderStatus: createdSession.normalizedState,
-      lastObservedAt: sessionObservedAt
+      lastObservedAt: sessionObservedAt,
+      providerLifecycleReason: createdSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN
+        ? 'Blocked: Jules returned an unknown session state. Inspect the exact session and confirm its status before resuming; do not create a replacement session.'
+        : 'Session creation response received. Continue only through the configured plan-approval and session monitoring workflow.'
     };
 
     // Attach session ID and lifecycle metadata to claim
@@ -278,7 +281,7 @@ export async function dispatchTask({
       claimId: activeClaim.claimId,
       sessionId: createdSession.id,
       metadata: sessionMetadata,
-      now: currentDate
+      now: new Date(sessionObservedAt)
     });
 
     const finalClaim = attachRes.claim || activeClaim;
@@ -364,7 +367,10 @@ export async function dispatchTask({
       providerSessionId: reconciledSession.id,
       rawProviderState: reconciledSession.state ?? null,
       normalizedProviderStatus: reconciledSession.normalizedState,
-      lastObservedAt: reconObservedAt
+      lastObservedAt: reconObservedAt,
+      providerLifecycleReason: reconciledSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN
+        ? 'Blocked: reconciled Jules session has an unknown state. Inspect this exact session before proceeding; do not create another session.'
+        : 'Creation response was ambiguous; this exact existing session was verified by read-only reconciliation. Do not retry session creation.'
     };
 
     const attachRes = await attachSessionToClaim({
@@ -372,7 +378,7 @@ export async function dispatchTask({
       claimId: activeClaim.claimId,
       sessionId: reconciledSession.id,
       metadata: sessionMetadata,
-      now: currentDate
+      now: new Date(reconObservedAt)
     });
 
     const finalClaim = attachRes.claim || activeClaim;
