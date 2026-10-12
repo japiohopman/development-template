@@ -50,6 +50,9 @@ function validateStateSnapshot(snapshot) {
   if (!Array.isArray(snapshot.claims)) {
     return { valid: false, reason: 'State snapshot must include a claims array; refusing to treat malformed state as empty.' };
   }
+  if (snapshot.head === null && snapshot.claims.length > 0) {
+    return { valid: false, reason: 'Uninitialized state store cannot contain claim records without an authoritative head.' };
+  }
   const seenIds = new Set();
   for (const claim of snapshot.claims) {
     const checked = validateClaimRecord(claim);
@@ -954,14 +957,14 @@ export async function reconcileAndRecoverClaim({
     };
   }
 
-  if (!VALID_STATUSES.has(targetStatus) || targetStatus === CLAIM_STATUS.ACTIVE) {
+  if (targetStatus !== CLAIM_STATUS.RELEASED && targetStatus !== CLAIM_STATUS.RECLAIMED) {
     return {
       claim: null,
       decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
       persistenceConfirmed: false,
       safeToDispatch: false,
-      reason: 'Target recovery status must be RELEASED, RECLAIMED, or EXPIRED.',
-      nextAction: 'Specify a valid terminal target status.'
+      reason: 'Target recovery status must be RELEASED or RECLAIMED.',
+      nextAction: 'Specify RELEASED or RECLAIMED after successful reconciliation.'
     };
   }
 
@@ -1104,15 +1107,45 @@ export async function reconcileAndRecoverClaim({
     }
 
     if (commitResult.ambiguous || commitResult.reason === 'STORAGE_WRITE_ERROR') {
-      const { claims: freshClaims } = await stateAdapter.readState();
-      const confirmed = (Array.isArray(freshClaims) ? freshClaims : []).find((c) => c && c.claimId === targetId);
-      if (confirmed && confirmed.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED && confirmed.status === targetStatus) {
+      let freshSnapshot;
+      try {
+        freshSnapshot = await stateAdapter.readState();
+      } catch (err) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+          persistenceConfirmed: false,
+          safeToDispatch: false,
+          reason: 'Reconciliation write was ambiguous and read-back failed: ' + String(err?.message || err),
+          nextAction: 'Do not assume recovery succeeded; restore state access and inspect this exact claim ID.'
+        };
+      }
+      const freshCheck = validateStateSnapshot(freshSnapshot);
+      if (!freshCheck.valid) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+          persistenceConfirmed: false,
+          safeToDispatch: false,
+          reason: 'Reconciliation read-back returned invalid state: ' + freshCheck.reason,
+          nextAction: 'Stop and repair the authoritative state store before retrying.'
+        };
+      }
+      const confirmed = freshSnapshot.claims.find((c) => c.claimId === targetId);
+      const evidenceMatches = confirmed?.metadata?.reconciliationEvidence
+        && JSON.stringify(confirmed.metadata.reconciliationEvidence) === JSON.stringify(evidence);
+      if (confirmed
+        && confirmed.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED
+        && confirmed.status === targetStatus
+        && confirmed.updatedAt === currentDate.toISOString()
+        && confirmed.metadata?.reconciledAt === currentDate.toISOString()
+        && evidenceMatches) {
         return {
           claim: confirmed,
           decisionCode: CLAIM_CODES.CLAIM_RECOVERED,
           persistenceConfirmed: true,
           safeToDispatch: false,
-          reason: 'Claim ' + targetId + ' reconciliation confirmed in state store following write response.',
+          reason: 'Claim ' + targetId + ' reconciliation and structured evidence were confirmed in state store following write response.',
           nextAction: 'Issue is un-claimed and safe for future candidate selection.'
         };
       }
@@ -1122,8 +1155,8 @@ export async function reconcileAndRecoverClaim({
         decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
         persistenceConfirmed: false,
         safeToDispatch: false,
-        reason: 'Reconciliation write failed or was ambiguous and claim ' + targetId + ' was not confirmed on read-back.',
-        nextAction: 'Retry claim reconciliation.'
+        reason: 'Reconciliation write failed or was ambiguous and the expected claim outcome/evidence was not confirmed on read-back.',
+        nextAction: 'Do not assume recovery succeeded; inspect and retry reconciliation only after authoritative state is re-read.'
       };
     }
 
