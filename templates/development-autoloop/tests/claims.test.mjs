@@ -83,6 +83,8 @@ test('normalizeRepositoryIdentity handles string and object inputs', () => {
   );
   assert.equal(normalizeRepositoryIdentity('invalid').valid, false);
   assert.equal(normalizeRepositoryIdentity(null).valid, false);
+  assert.equal(normalizeRepositoryIdentity({ owner: 'acme/extra', repo: 'autoloop' }).valid, false);
+  assert.equal(normalizeRepositoryIdentity({ owner: 'acme', repo: 'auto loop' }).valid, false);
 });
 
 test('validateClaimRecord validates valid claims and rejects malformed fields', () => {
@@ -106,6 +108,9 @@ test('validateClaimRecord validates valid claims and rejects malformed fields', 
 
   const nonIsoDate = validSampleClaim({ createdAt: 'March 31 2026' });
   assert.equal(validateClaimRecord(nonIsoDate).valid, false);
+
+  const impossibleIsoDate = validSampleClaim({ createdAt: '2026-02-30T10:00:00.000Z' });
+  assert.equal(validateClaimRecord(impossibleIsoDate).valid, false);
 
   const missingSessionId = validSampleClaim();
   delete missingSessionId.sessionId;
