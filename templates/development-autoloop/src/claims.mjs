@@ -881,7 +881,7 @@ export async function inspectClaim({ stateAdapter, claimId, now = new Date() }) 
  * @param {*} evidence
  * @returns {{ verified: boolean, reason?: string }}
  */
-export function validateReconciliationEvidence(evidence) {
+export function validateReconciliationEvidence(evidence, expectedClaim = null, now = null) {
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
     return { verified: false, reason: 'Reconciliation evidence must be a non-null object.' };
   }
@@ -890,34 +890,83 @@ export function validateReconciliationEvidence(evidence) {
     return { verified: false, reason: 'Reconciliation evidence verified property must be explicitly true.' };
   }
 
-  // Session evidence
-  const sessionStatus = String(evidence.sessions?.status ?? evidence.sessions ?? '').toLowerCase().trim();
-  const validSessionStatuses = new Set(['terminal', 'none', 'completed', 'failed', 'cancelled', 'canceled', 'expired', 'reconciled']);
-  if (!validSessionStatuses.has(sessionStatus)) {
-    return {
-      verified: false,
-      reason: 'Provider session reconciliation evidence is missing, active, or unverified (status: ' + (sessionStatus || 'unspecified') + ').'
-    };
+  if (typeof evidence.claimId !== 'string' || !evidence.claimId.trim()) {
+    return { verified: false, reason: 'Reconciliation evidence must bind to an exact claimId.' };
   }
 
-  // Branch evidence
-  const branchStatus = String(evidence.branches?.status ?? evidence.branches ?? '').toLowerCase().trim();
-  const validBranchStatuses = new Set(['clean', 'deleted', 'merged', 'none', 'reconciled']);
-  if (!validBranchStatuses.has(branchStatus)) {
-    return {
-      verified: false,
-      reason: 'Branch reconciliation evidence is missing, unpushed, or unverified (status: ' + (branchStatus || 'unspecified') + ').'
-    };
+  const repoCheck = normalizeRepositoryIdentity(evidence.repository);
+  if (!repoCheck.valid) {
+    return { verified: false, reason: 'Reconciliation evidence must identify the repository it inspected.' };
+  }
+  if (!Number.isInteger(evidence.issueNumber) || evidence.issueNumber < 1) {
+    return { verified: false, reason: 'Reconciliation evidence must identify a positive Issue number.' };
+  }
+  if (typeof evidence.verifiedBy !== 'string' || !evidence.verifiedBy.trim()) {
+    return { verified: false, reason: 'Reconciliation evidence must identify who/what verified it.' };
+  }
+  if (!isValidIsoTimestamp(evidence.verifiedAt)) {
+    return { verified: false, reason: 'Reconciliation evidence must include a valid ISO verifiedAt timestamp.' };
   }
 
-  // PR evidence
-  const prStatus = String(evidence.pullRequests?.status ?? evidence.pullRequests ?? '').toLowerCase().trim();
-  const validPRStatuses = new Set(['merged', 'closed_classified', 'none', 'reconciled']);
-  if (!validPRStatuses.has(prStatus)) {
-    return {
-      verified: false,
-      reason: 'Pull request reconciliation evidence is missing, open, or unverified (status: ' + (prStatus || 'unspecified') + ').'
-    };
+  const domains = [
+    { key: 'sessions', valid: new Set(['terminal', 'none', 'completed', 'failed', 'cancelled', 'canceled', 'expired', 'reconciled']), label: 'provider session' },
+    { key: 'branches', valid: new Set(['clean', 'deleted', 'merged', 'none', 'reconciled']), label: 'branch' },
+    { key: 'pullRequests', valid: new Set(['merged', 'closed_classified', 'none', 'reconciled']), label: 'pull request' }
+  ];
+  const verifiedAtMs = Date.parse(evidence.verifiedAt);
+  for (const domain of domains) {
+    const item = evidence[domain.key];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' is missing or malformed.' };
+    }
+    if (item.verified !== true) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must be explicitly verified.' };
+    }
+    const status = String(item.status ?? '').toLowerCase().trim();
+    if (!domain.valid.has(status)) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' has an unknown/unsafe status (' + (status || 'unspecified') + ').' };
+    }
+    if (typeof item.source !== 'string' || !item.source.trim()) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must identify the source inspected.' };
+    }
+    if (!isValidIsoTimestamp(item.observedAt)) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must include a valid ISO observedAt timestamp.' };
+    }
+    if (Date.parse(item.observedAt) > verifiedAtMs) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' cannot be observed after verifiedAt.' };
+    }
+  }
+
+  if (expectedClaim) {
+    if (evidence.claimId !== expectedClaim.claimId) {
+      return { verified: false, reason: 'Reconciliation evidence claimId does not match the target claim.' };
+    }
+    const expectedRepo = normalizeRepositoryIdentity(expectedClaim.repository).repository;
+    if (!expectedRepo || repoCheck.repository.owner !== expectedRepo.owner || repoCheck.repository.repo !== expectedRepo.repo) {
+      return { verified: false, reason: 'Reconciliation evidence repository does not match the target claim.' };
+    }
+    if (evidence.issueNumber !== expectedClaim.issueNumber) {
+      return { verified: false, reason: 'Reconciliation evidence Issue number does not match the target claim.' };
+    }
+    const claimCreatedAt = Date.parse(expectedClaim.createdAt);
+    if (verifiedAtMs < claimCreatedAt) {
+      return { verified: false, reason: 'Reconciliation evidence predates the claim being recovered.' };
+    }
+    for (const domain of domains) {
+      if (Date.parse(evidence[domain.key].observedAt) < claimCreatedAt) {
+        return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' predates the claim being recovered.' };
+      }
+    }
+    if (now !== null) {
+      const nowMs = new Date(now).getTime();
+      if (!Number.isFinite(nowMs) || verifiedAtMs > nowMs) {
+        return { verified: false, reason: 'Reconciliation verifiedAt must be valid and cannot be in the future.' };
+      }
+      const maxAgeMs = 5 * 60 * 1000;
+      if (nowMs - verifiedAtMs > maxAgeMs) {
+        return { verified: false, reason: 'Reconciliation evidence is older than the five-minute freshness limit.' };
+      }
+    }
   }
 
   return { verified: true };
@@ -1064,6 +1113,18 @@ export async function reconcileAndRecoverClaim({
         safeToDispatch: false,
         reason: 'Claim ID ' + targetId + ' is malformed in state store.',
         nextAction: 'Repair malformed claim record.'
+      };
+    }
+
+    const scopedEvidenceCheck = validateReconciliationEvidence(evidence, currentClaim, currentDate);
+    if (!scopedEvidenceCheck.verified) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_RECOVERY_BLOCKED,
+        persistenceConfirmed: true,
+        safeToDispatch: false,
+        reason: scopedEvidenceCheck.reason,
+        nextAction: 'Collect fresh, claim-scoped verification evidence for the exact repository, Issue, sessions, branches, and pull requests.'
       };
     }
 
