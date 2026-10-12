@@ -201,6 +201,19 @@ export function validateClaimRecord(record) {
     errors.push(diagnostic(['reconciliationStatus'], 'UNKNOWN_RECONCILIATION_STATUS', 'reconciliationStatus must be one of: ' + Array.from(VALID_RECONCILIATION_STATUSES).join(', ') + '.'));
   }
 
+  if (VALID_STATUSES.has(record.status) && VALID_RECONCILIATION_STATUSES.has(record.reconciliationStatus)) {
+    if (record.status === CLAIM_STATUS.ACTIVE && record.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED) {
+      errors.push(diagnostic(['status'], 'INCONSISTENT_CLAIM_LIFECYCLE', 'An ACTIVE claim cannot already be marked RECONCILED.'));
+    }
+    if ((record.status === CLAIM_STATUS.RELEASED || record.status === CLAIM_STATUS.RECLAIMED)
+      && record.reconciliationStatus !== RECONCILIATION_STATUS.RECONCILED) {
+      errors.push(diagnostic(['reconciliationStatus'], 'INCONSISTENT_CLAIM_LIFECYCLE', 'A RELEASED or RECLAIMED claim must have verified RECONCILED status.'));
+    }
+    if (record.status === CLAIM_STATUS.EXPIRED && record.reconciliationStatus === RECONCILIATION_STATUS.RECONCILED) {
+      errors.push(diagnostic(['status'], 'INCONSISTENT_CLAIM_LIFECYCLE', 'EXPIRED is a stale-claim state, not a reconciled release outcome.'));
+    }
+  }
+
   if (!isValidIsoTimestamp(record.updatedAt)) {
     errors.push(diagnostic(['updatedAt'], 'INVALID_TIMESTAMP', 'updatedAt must be a valid ISO timestamp string.'));
   }
