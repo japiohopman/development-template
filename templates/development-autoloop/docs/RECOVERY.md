@@ -15,6 +15,10 @@ Emit the decision code, timestamp, Issue/PR/session/claim identifiers, failed ch
   2. **Git branches:** confirmed clean, deleted, merged, or verified non-existent (`none`).
   3. **Pull requests:** confirmed merged, closed with explicit human classification, or verified non-existent (`none`).
   Missing, partial, failed, or unknown evidence blocks recovery (`CLAIM_RECOVERY_BLOCKED`).
+
+- **Evidence scope and freshness:** the evidence record must name the exact `claimId`, repository, Issue number, `verifiedBy`, and ISO `verifiedAt`. Each of `sessions`, `branches`, and `pullRequests` must independently include `verified: true`, the same repository and Issue number, a source identifier, an ISO `observedAt`, and a permitted status. A non-`none` session result must identify the exact inspected session; if the claim already has a `sessionId`, the evidence must match it.
+- **Time bounds:** each domain's `observedAt` must not be later than `verifiedAt` and must not predate the claim. Recovery rejects evidence that is future-dated or more than five minutes old at the moment of recovery.
+- **Verification responsibility:** this claim layer validates the evidence's schema, scope, timestamps, freshness, and audit persistence. It does not itself contact Jules or query GitHub to prove the evidence is true. The future reconciliation/controller layer must only produce this record after the corresponding read-only checks have actually succeeded.
 - **Ambiguous provider creation timeout:** search/reconcile by claim ID and provider metadata before retrying. If it cannot be resolved, stop and escalate.
 - **Failed or ambiguous state write:** state updates perform exact `claimId` read-back confirmation. If write response is ambiguous and read-back does not confirm the claim, report `CLAIM_PERSISTENCE_FAILED` and do not report success.
 - **Review event for an old PR head:** mark it stale and require review of the current head SHA.
