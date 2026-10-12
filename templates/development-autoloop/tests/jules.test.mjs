@@ -235,7 +235,7 @@ test('JulesClient fails closed when authoritative Source details disagree with l
   const client = new JulesClient({
     apiKey: 'test-key',
     fetchImpl: async (url) => {
-      if (!url.endsWith('/v1alpha/sources')) {
+      if (new URL(url).pathname !== '/v1alpha/sources') {
         return { ok: true, json: async () => ({
           name: 'sources/github/acme/project',
           githubRepo: { owner: 'other-owner', repo: 'project', branches: ['main'] }
@@ -253,7 +253,7 @@ test('JulesClient refuses to trust a list summary when full Source details are i
   const client = new JulesClient({
     apiKey: 'test-key',
     fetchImpl: async (url) => {
-      if (!url.endsWith('/v1alpha/sources')) {
+      if (new URL(url).pathname !== '/v1alpha/sources') {
         return { ok: true, json: async () => ({ name: 'sources/github/acme/project' }) };
       }
       return { ok: true, json: async () => ({
