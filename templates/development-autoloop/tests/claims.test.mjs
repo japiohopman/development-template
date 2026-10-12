@@ -655,3 +655,97 @@ test('state snapshot with duplicate claim IDs fails closed', async () => {
   assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
   assert.equal(result.safeToDispatch, false);
 });
+
+
+test('recovery target cannot be EXPIRED because expiry is not a reconciled release outcome', async () => {
+  const stateAdapter = new InMemoryStateAdapter();
+  const result = await reconcileAndRecoverClaim({
+    stateAdapter,
+    claimId: 'target-status-check',
+    evidence: {
+      verified: true,
+      sessions: { status: 'none' },
+      branches: { status: 'none' },
+      pullRequests: { status: 'none' }
+    },
+    targetStatus: CLAIM_STATUS.EXPIRED
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(result.persistenceConfirmed, false);
+});
+
+test('claim snapshot with records but no authoritative head fails closed', async () => {
+  const malformedAdapter = {
+    async readState() {
+      return { head: null, claims: [validSampleClaim()] };
+    },
+    async commitStateChange() {
+      throw new Error('commit must never be called for malformed state');
+    }
+  };
+  const result = await acquireClaim({
+    stateAdapter: malformedAdapter,
+    repository: 'acme/autoloop',
+    issueNumber: 24,
+    owner: 'run-no-head',
+    provider: 'jules'
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(result.safeToDispatch, false);
+});
+
+test('GitHubStateBranchAdapter rejects a missing claims.json on an existing state branch', async () => {
+  const octokit = {
+    async request(route) {
+      if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') {
+        return { data: { object: { sha: 'existing-head-commit-sha' } } };
+      }
+      if (route === 'GET /repos/{owner}/{repo}/contents/{path}') {
+        const error = new Error('Not Found');
+        error.status = 404;
+        throw error;
+      }
+      throw new Error('Unexpected mocked GitHub route: ' + route);
+    }
+  };
+  const adapter = new GitHubStateBranchAdapter({
+    octokit,
+    repository: 'acme/autoloop',
+    stateBranch: 'autoloop-state',
+    defaultBranch: 'main'
+  });
+  await assert.rejects(
+    () => adapter.readState(),
+    (error) => error?.code === 'INVALID_STATE_STORE'
+  );
+});
+
+test('ambiguous recovery write is confirmed only when exact reconciliation evidence is persisted', async () => {
+  const staleClaim = validSampleClaim({
+    claimId: 'ambiguous-recovery-claim',
+    issueNumber: 404,
+    createdAt: '2026-03-31T07:00:00.000Z',
+    expiresAt: '2026-03-31T07:45:00.000Z',
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [staleClaim], head: 'v1' });
+  stateAdapter.injectedAmbiguousWriteOnce = true;
+  const evidence = {
+    verified: true,
+    sessions: { status: 'none', source: 'mock-session-inventory' },
+    branches: { status: 'none', source: 'mock-branch-inventory' },
+    pullRequests: { status: 'none', source: 'mock-pr-inventory' },
+    summary: 'Mocked exact-ID reconciliation evidence'
+  };
+  const result = await reconcileAndRecoverClaim({
+    stateAdapter,
+    claimId: staleClaim.claimId,
+    evidence,
+    targetStatus: CLAIM_STATUS.RECLAIMED,
+    now: new Date('2026-03-31T10:00:00.000Z')
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_RECOVERED);
+  assert.equal(result.persistenceConfirmed, true);
+  assert.deepEqual(result.claim.metadata.reconciliationEvidence, evidence);
+});
