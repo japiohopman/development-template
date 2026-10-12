@@ -102,7 +102,7 @@ function sortDiagnostics(errors) {
 }
 
 function isValidIsoTimestamp(str) {
-  if (typeof str !== 'string' || !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:Z|[+-]\\d{2}:\\d{2})$/.test(str)) {
+  if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(str)) {
     return false;
   }
   return Number.isFinite(Date.parse(str));
