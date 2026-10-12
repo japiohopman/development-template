@@ -371,6 +371,10 @@ test('reconcileAndRecoverClaim requires explicit verified reconciliation evidenc
   assert.equal(recoverRes.persistenceConfirmed, true);
   assert.equal(recoverRes.claim.reconciliationStatus, RECONCILIATION_STATUS.RECONCILED);
   assert.equal(recoverRes.claim.status, CLAIM_STATUS.RECLAIMED);
+  assert.equal(recoverRes.claim.metadata.reconciliationEvidence.verified, true);
+  assert.equal(recoverRes.claim.metadata.reconciliationEvidence.sessions.status, 'terminal');
+  assert.equal(recoverRes.claim.metadata.reconciliationEvidence.branches.status, 'deleted');
+  assert.equal(recoverRes.claim.metadata.reconciliationEvidence.pullRequests.status, 'merged');
 
   // Verify inspection
   const inspected = await inspectClaim({ stateAdapter, claimId: 'stale-claim-99', now });
@@ -466,4 +470,188 @@ test('fixture: crash-before-provider-call stale claim requires evidence reconcil
   });
   assert.equal(c3.decisionCode, CLAIM_CODES.CLAIM_ACQUIRED);
   assert.notEqual(c3.claim.claimId, c1.claim.claimId);
+});
+
+
+test('EXPIRED claim with pending reconciliation still blocks duplicate acquisition', async () => {
+  const expiredPending = validSampleClaim({
+    claimId: 'expired-pending-50',
+    issueNumber: 50,
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING,
+    createdAt: '2026-03-31T08:00:00.000Z',
+    expiresAt: '2026-03-31T08:45:00.000Z'
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [expiredPending], head: 'v1' });
+  const result = await acquireClaim({
+    stateAdapter,
+    repository: 'acme/autoloop',
+    issueNumber: 50,
+    owner: 'run-2',
+    provider: 'jules',
+    now: new Date('2026-03-31T10:00:00.000Z')
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_BLOCKED_STALE_UNRECONCILED);
+  assert.equal(result.safeToDispatch, false);
+  assert.equal((await stateAdapter.readState()).claims.length, 1);
+});
+
+test('claimId cannot be reused for a different Issue even when the old claim is terminal', async () => {
+  const oldClaim = validSampleClaim({
+    claimId: 'globally-unique-claim-id',
+    issueNumber: 11,
+    status: CLAIM_STATUS.RELEASED,
+    reconciliationStatus: RECONCILIATION_STATUS.RECONCILED
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [oldClaim], head: 'v1' });
+  const result = await acquireClaim({
+    stateAdapter,
+    repository: 'acme/autoloop',
+    issueNumber: 12,
+    owner: 'run-new',
+    provider: 'jules',
+    claimId: 'globally-unique-claim-id'
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_ALREADY_EXISTS);
+  assert.equal(result.safeToDispatch, false);
+  assert.equal(result.claim.issueNumber, 11);
+  assert.equal((await stateAdapter.readState()).claims.length, 1);
+});
+
+test('acquire and recovery reject non-finite, negative, fractional, and oversized retry limits', async () => {
+  const retryValues = [Infinity, -1, 1.5, 6];
+  for (const maxRetries of retryValues) {
+    const stateAdapter = new InMemoryStateAdapter();
+    const acquired = await acquireClaim({
+      stateAdapter,
+      repository: 'acme/autoloop',
+      issueNumber: 23,
+      owner: 'run-retries',
+      provider: 'jules',
+      maxRetries
+    });
+    assert.equal(acquired.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+    assert.equal((await stateAdapter.readState()).claims.length, 0);
+
+    const recovered = await reconcileAndRecoverClaim({
+      stateAdapter,
+      claimId: 'anything',
+      evidence: {
+        verified: true,
+        sessions: { status: 'none' },
+        branches: { status: 'none' },
+        pullRequests: { status: 'none' }
+      },
+      maxRetries
+    });
+    assert.equal(recovered.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  }
+});
+
+test('recovery cannot release an unexpired active claim', async () => {
+  const activeClaim = validSampleClaim({
+    claimId: 'still-live-claim',
+    issueNumber: 77,
+    createdAt: '2026-03-31T10:00:00.000Z',
+    expiresAt: '2026-03-31T10:45:00.000Z',
+    status: CLAIM_STATUS.ACTIVE,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [activeClaim], head: 'v1' });
+  const result = await reconcileAndRecoverClaim({
+    stateAdapter,
+    claimId: activeClaim.claimId,
+    evidence: {
+      verified: true,
+      sessions: { status: 'terminal' },
+      branches: { status: 'clean' },
+      pullRequests: { status: 'merged' }
+    },
+    targetStatus: CLAIM_STATUS.RELEASED,
+    now: new Date('2026-03-31T10:15:00.000Z')
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_RECOVERY_BLOCKED);
+  assert.equal(result.persistenceConfirmed, true);
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].status, CLAIM_STATUS.ACTIVE);
+  assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
+});
+
+test('GitHubStateBranchAdapter update uses the parent commit tree SHA for base_tree', async () => {
+  const requests = [];
+  const octokit = {
+    async request(route, args) {
+      requests.push({ route, args });
+      switch (route) {
+        case 'GET /repos/{owner}/{repo}/git/ref/{ref}':
+          return { data: { object: { sha: 'existing-head-commit-sha' } } };
+        case 'GET /repos/{owner}/{repo}/git/commits/{commit_sha}':
+          assert.equal(args.commit_sha, 'existing-head-commit-sha');
+          return { data: { tree: { sha: 'existing-tree-object-sha' } } };
+        case 'POST /repos/{owner}/{repo}/git/blobs':
+          return { data: { sha: 'new-blob-sha' } };
+        case 'POST /repos/{owner}/{repo}/git/trees':
+          return { data: { sha: 'new-tree-sha' } };
+        case 'POST /repos/{owner}/{repo}/git/commits':
+          return { data: { sha: 'new-head-commit-sha' } };
+        case 'PATCH /repos/{owner}/{repo}/git/refs/{ref}':
+          assert.equal(args.force, false);
+          return { data: { object: { sha: 'new-head-commit-sha' } } };
+        default:
+          throw new Error('Unexpected mocked GitHub route: ' + route);
+      }
+    }
+  };
+  const adapter = new GitHubStateBranchAdapter({
+    octokit,
+    repository: 'acme/autoloop',
+    stateBranch: 'autoloop-state',
+    defaultBranch: 'main'
+  });
+  const result = await adapter.commitStateChange('existing-head-commit-sha', [validSampleClaim()]);
+  assert.equal(result.success, true);
+  const treeRequest = requests.find((request) => request.route === 'POST /repos/{owner}/{repo}/git/trees');
+  assert.equal(treeRequest.args.base_tree, 'existing-tree-object-sha');
+  assert.notEqual(treeRequest.args.base_tree, 'existing-head-commit-sha');
+  const commitRequest = requests.find((request) => request.route === 'POST /repos/{owner}/{repo}/git/commits');
+  assert.deepEqual(commitRequest.args.parents, ['existing-head-commit-sha']);
+});
+
+test('GitHubStateBranchAdapter rejects malformed persisted state instead of treating it as empty', async () => {
+  const octokit = {
+    async request(route) {
+      if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') {
+        return { data: { object: { sha: 'existing-head-commit-sha' } } };
+      }
+      if (route === 'GET /repos/{owner}/{repo}/contents/{path}') {
+        return { data: { content: Buffer.from(JSON.stringify({ items: [] }), 'utf8').toString('base64') } };
+      }
+      throw new Error('Unexpected mocked GitHub route: ' + route);
+    }
+  };
+  const adapter = new GitHubStateBranchAdapter({
+    octokit,
+    repository: 'acme/autoloop',
+    stateBranch: 'autoloop-state',
+    defaultBranch: 'main'
+  });
+  await assert.rejects(
+    () => adapter.readState(),
+    (error) => error?.code === 'INVALID_STATE_STORE'
+  );
+});
+
+test('state snapshot with duplicate claim IDs fails closed', async () => {
+  const duplicateA = validSampleClaim({ claimId: 'duplicate-id', issueNumber: 1 });
+  const duplicateB = validSampleClaim({ claimId: 'duplicate-id', issueNumber: 2 });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [duplicateA, duplicateB], head: 'v1' });
+  const result = await acquireClaim({
+    stateAdapter,
+    repository: 'acme/autoloop',
+    issueNumber: 3,
+    owner: 'run-3',
+    provider: 'jules'
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(result.safeToDispatch, false);
 });
