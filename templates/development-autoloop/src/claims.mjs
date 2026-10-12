@@ -243,29 +243,6 @@ export function validateClaimRecord(record) {
   if (record.metadata !== undefined && record.metadata !== null && (typeof record.metadata !== 'object' || Array.isArray(record.metadata))) {
     errors.push(diagnostic(['metadata'], 'INVALID_METADATA', 'metadata must be an object if provided.'));
   }
-  if (record.metadata && typeof record.metadata === 'object' && !Array.isArray(record.metadata)) {
-    const lifecycleKeys = ['providerSessionId', 'rawProviderState', 'normalizedProviderStatus', 'lastObservedAt', 'providerLifecycleReason'];
-    if (lifecycleKeys.some((key) => Object.prototype.hasOwnProperty.call(record.metadata, key))) {
-      if (typeof record.metadata.providerSessionId !== 'string' || !record.metadata.providerSessionId.trim()
-        || record.metadata.providerSessionId !== record.sessionId) {
-        errors.push(diagnostic(['metadata', 'providerSessionId'], 'INVALID_PROVIDER_LIFECYCLE_METADATA', 'providerSessionId must match the claim sessionId.'));
-      }
-      if (!(record.metadata.rawProviderState === null
-        || (typeof record.metadata.rawProviderState === 'string' && record.metadata.rawProviderState.trim()))) {
-        errors.push(diagnostic(['metadata', 'rawProviderState'], 'INVALID_PROVIDER_LIFECYCLE_METADATA', 'rawProviderState must be null or a non-empty string.'));
-      }
-      const allowedNormalizedStates = ['QUEUED', 'ACTIVE', 'AWAITING_INPUT', 'PAUSED', 'COMPLETED', 'FAILED', 'UNKNOWN'];
-      if (!allowedNormalizedStates.includes(record.metadata.normalizedProviderStatus)) {
-        errors.push(diagnostic(['metadata', 'normalizedProviderStatus'], 'INVALID_PROVIDER_LIFECYCLE_METADATA', 'normalizedProviderStatus must be a recognized normalized provider status.'));
-      }
-      if (!isValidIsoTimestamp(record.metadata.lastObservedAt)) {
-        errors.push(diagnostic(['metadata', 'lastObservedAt'], 'INVALID_TIMESTAMP', 'lastObservedAt must be a valid ISO timestamp.'));
-      }
-      if (typeof record.metadata.providerLifecycleReason !== 'string' || !record.metadata.providerLifecycleReason.trim()) {
-        errors.push(diagnostic(['metadata', 'providerLifecycleReason'], 'INVALID_PROVIDER_LIFECYCLE_METADATA', 'providerLifecycleReason must contain an actionable status or block reason.'));
-      }
-    }
-  }
 
   const sorted = sortDiagnostics(errors);
   return { valid: sorted.length === 0, errors: sorted };
@@ -1413,15 +1390,6 @@ export async function attachSessionToClaim({
       nextAction: 'Provide a valid provider session ID.'
     };
   }
-  if (metadata !== null && (typeof metadata !== 'object' || Array.isArray(metadata))) {
-    return {
-      claim: null,
-      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
-      persistenceConfirmed: false,
-      reason: 'metadata must be an object when supplied.',
-      nextAction: 'Provide validated metadata fields or omit metadata.'
-    };
-  }
 
   const targetId = claimId.trim();
   const targetSessionId = sessionId.trim();
@@ -1498,6 +1466,16 @@ export async function attachSessionToClaim({
       };
     }
 
+    if (currentClaim.sessionId === targetSessionId) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
+        persistenceConfirmed: true,
+        reason: 'Claim ' + targetId + ' is already associated with session ' + targetSessionId + '.',
+        nextAction: 'Session ID is already recorded.'
+      };
+    }
+
     if (currentClaim.sessionId !== null && currentClaim.sessionId !== targetSessionId) {
       return {
         claim: currentClaim,
@@ -1525,19 +1503,8 @@ export async function attachSessionToClaim({
         claim: null,
         decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
         persistenceConfirmed: false,
-        reason: 'Updated claim record with session ID or lifecycle metadata failed schema validation.',
+        reason: 'Updated claim record with session ID failed schema validation.',
         nextAction: 'Fix claim parameters.'
-      };
-    }
-
-    if (currentClaim.sessionId === targetSessionId
-      && JSON.stringify(currentClaim.metadata || {}) === JSON.stringify(mergedMetadata)) {
-      return {
-        claim: currentClaim,
-        decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
-        persistenceConfirmed: true,
-        reason: 'Claim ' + targetId + ' is already associated with session ' + targetSessionId + ' and metadata is up to date.',
-        nextAction: 'Session association and lifecycle metadata are already recorded.'
       };
     }
 
@@ -1591,8 +1558,7 @@ export async function attachSessionToClaim({
       }
 
       const confirmed = freshSnapshot.claims.find((c) => c.claimId === targetId);
-      if (confirmed && confirmed.sessionId === targetSessionId
-        && JSON.stringify(confirmed.metadata || {}) === JSON.stringify(mergedMetadata)) {
+      if (confirmed && confirmed.sessionId === targetSessionId) {
         return {
           claim: confirmed,
           decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
