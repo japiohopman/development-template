@@ -976,7 +976,8 @@ test('attachSessionToClaim is idempotent when same session ID is provided', asyn
   const res = await attachSessionToClaim({
     stateAdapter,
     claimId: 'claim-attach-2',
-    sessionId: 'session-xyz-123'
+    sessionId: 'session-xyz-123',
+    now: new Date('2026-03-31T10:15:00.000Z')
   });
 
   assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
@@ -991,7 +992,8 @@ test('attachSessionToClaim rejects overwriting with a different session ID', asy
   const res = await attachSessionToClaim({
     stateAdapter,
     claimId: 'claim-attach-3',
-    sessionId: 'session-new-different'
+    sessionId: 'session-new-different',
+    now: new Date('2026-03-31T10:15:00.000Z')
   });
 
   assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_CONFLICT);
@@ -1000,6 +1002,51 @@ test('attachSessionToClaim rejects overwriting with a different session ID', asy
 
   const snapshot = await stateAdapter.readState();
   assert.equal(snapshot.claims[0].sessionId, 'session-existing');
+});
+
+test('attachSessionToClaim rejects expired or non-active claims', async () => {
+  const expiredClaim = validSampleClaim({
+    claimId: 'claim-expired-attach',
+    sessionId: null,
+    createdAt: '2026-03-31T08:00:00.000Z',
+    expiresAt: '2026-03-31T08:45:00.000Z'
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [expiredClaim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-expired-attach',
+    sessionId: 'session-late',
+    now: new Date('2026-03-31T10:00:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(res.persistenceConfirmed, false);
+});
+
+test('attachSessionToClaim handles commit rejection gracefully via read-back reconciliation', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-reject-commit', sessionId: null });
+  let commitAttempted = false;
+  const rejectingAdapter = {
+    async readState() {
+      return { head: 'v1', claims: [commitAttempted ? { ...claim, sessionId: 'sess-reject' } : claim] };
+    },
+    async commitStateChange() {
+      commitAttempted = true;
+      throw new Error('Database connection dropped during commit');
+    }
+  };
+
+  const res = await attachSessionToClaim({
+    stateAdapter: rejectingAdapter,
+    claimId: 'claim-reject-commit',
+    sessionId: 'sess-reject',
+    now: new Date('2026-03-31T10:15:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'sess-reject');
 });
 
 

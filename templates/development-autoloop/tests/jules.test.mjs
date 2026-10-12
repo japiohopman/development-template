@@ -29,14 +29,21 @@ test('sanitizeJulesErrorMessage redacts sensitive API key', () => {
   assert.equal(sanitized.includes('[REDACTED]'), true);
 });
 
-test('JulesClient listSources handles pagination', async () => {
+test('JulesClient listSources handles pagination and verifies branch if specified', async () => {
   const mockFetch = async (url) => {
     if (url.includes('pageToken=page2')) {
       return {
         ok: true,
         json: async () => ({
           sources: [
-            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop' } }
+            {
+              name: 'sources/github/acme/autoloop',
+              githubRepo: {
+                owner: 'acme',
+                repo: 'autoloop',
+                branches: [{ displayName: 'main' }, { displayName: 'feature' }]
+              }
+            }
           ]
         })
       };
@@ -45,7 +52,7 @@ test('JulesClient listSources handles pagination', async () => {
       ok: true,
       json: async () => ({
         sources: [
-          { name: 'sources/github/other/repo', githubRepo: { owner: 'other', repo: 'repo' } }
+          { name: 'sources/github/other/repo', githubRepo: { owner: 'other', repo: 'repo', branches: ['main'] } }
         ],
         nextPageToken: 'page2'
       })
@@ -57,8 +64,11 @@ test('JulesClient listSources handles pagination', async () => {
   assert.equal(sources.length, 2);
   assert.equal(sources[1].name, 'sources/github/acme/autoloop');
 
-  const match = await client.findSourceForRepository('acme/autoloop');
+  const match = await client.findSourceForRepository('acme/autoloop', 'main');
   assert.equal(match.name, 'sources/github/acme/autoloop');
+
+  const noBranchMatch = await client.findSourceForRepository('acme/autoloop', 'nonexistent-branch');
+  assert.equal(noBranchMatch, null);
 });
 
 test('JulesClient createSession enforces requirePlanApproval: true', async () => {

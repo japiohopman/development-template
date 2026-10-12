@@ -153,11 +153,12 @@ export class JulesClient {
   }
 
   /**
-   * Find source for exact repository identity (owner/repo).
+   * Find source for exact repository identity (owner/repo) and verify starting branch exists.
    * @param {*} repository
+   * @param {string} [startingBranch] Optional starting branch to verify
    * @returns {Promise<object|null>} Matched source object or null
    */
-  async findSourceForRepository(repository) {
+  async findSourceForRepository(repository, startingBranch = null) {
     const repoCheck = normalizeRepositoryIdentity(repository);
     if (!repoCheck.valid) {
       throw new Error('Invalid repository identity provided for source lookup.');
@@ -170,6 +171,22 @@ export class JulesClient {
       const srcRepo = src?.githubRepo?.repo;
       if (typeof srcOwner === 'string' && typeof srcRepo === 'string') {
         if (srcOwner.trim().toLowerCase() === target.owner && srcRepo.trim().toLowerCase() === target.repo) {
+          if (startingBranch) {
+            const targetBranch = startingBranch.trim();
+            const branches = Array.isArray(src?.githubRepo?.branches)
+              ? src.githubRepo.branches
+              : (Array.isArray(src?.branches) ? src.branches : null);
+
+            if (branches && branches.length > 0) {
+              const hasBranch = branches.some((b) => {
+                const bName = typeof b === 'string' ? b : (b?.displayName || b?.name || '');
+                return bName.trim() === targetBranch;
+              });
+              if (!hasBranch) {
+                return null;
+              }
+            }
+          }
           return src;
         }
       }

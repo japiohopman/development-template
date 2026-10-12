@@ -5,15 +5,38 @@ import {
   validateDispatchPacket,
   DISPATCH_CODES
 } from '../src/dispatch.mjs';
-import { InMemoryStateAdapter, CLAIM_CODES } from '../src/claims.mjs';
+import { InMemoryStateAdapter } from '../src/claims.mjs';
 import { JulesClient } from '../src/jules.mjs';
 
 function sampleConfig(overrides = {}) {
   return {
+    schemaVersion: 1,
     enabled: true,
+    defaultBranch: 'main',
     runMode: 'live',
-    provider: 'jules',
-    confirmation: 'DISPATCH',
+    workProvider: 'jules',
+    reviewProvider: 'manual',
+    maxConcurrentSessions: 1,
+    humanReadinessRequired: false,
+    automaticMerge: false,
+    scheduleEnabled: false,
+    requiredConfirmation: 'DISPATCH',
+    staleClaimMinutes: 45,
+    labels: {
+      proposed: 'proposed',
+      ready: 'roadmap-ready',
+      claimed: 'automation-claimed',
+      inProgress: 'in-progress',
+      awaitingReview: 'awaiting-review',
+      changesRequested: 'changes-requested',
+      approved: 'review-approved',
+      blocked: 'automation-blocked',
+      escalated: 'needs-human'
+    },
+    requiredIssueSections: ['Scope'],
+    requiredChecks: [],
+    trustedReviewers: [],
+    sequenceSource: null,
     ...overrides
   };
 }
@@ -60,7 +83,7 @@ test('dispatchTask fails when runMode is dry-run', async () => {
 });
 
 test('dispatchTask fails when provider is not jules', async () => {
-  const config = sampleConfig({ provider: 'none' });
+  const config = sampleConfig({ workProvider: 'none' });
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
@@ -70,7 +93,7 @@ test('dispatchTask fails when provider is not jules', async () => {
 });
 
 test('dispatchTask fails closed on non-exact confirmation string', async () => {
-  const config = sampleConfig({ confirmation: 'DISPATCH' });
+  const config = sampleConfig({ requiredConfirmation: 'DISPATCH' });
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
@@ -80,6 +103,104 @@ test('dispatchTask fails closed on non-exact confirmation string', async () => {
     assert.equal(res.success, false);
     assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID);
   }
+});
+
+test('dispatchTask succeeds with a valid schema-backed config and preflight gate', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket({ issueNumber: 100 });
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const mockSnapshot = {
+    snapshotComplete: true,
+    issues: [
+      {
+        number: 100,
+        title: 'Fix issue 100',
+        state: 'open',
+        labels: ['roadmap-ready'],
+        body: '## Scope\nFix issue 100.'
+      }
+    ],
+    pullRequests: [],
+    sessions: [],
+    claims: []
+  };
+
+  const mockFetch = async (url, options) => {
+    if (url.includes('/v1alpha/sources')) {
+      return {
+        ok: true,
+        json: async () => ({
+          sources: [
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
+          ]
+        })
+      };
+    }
+    if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'sessions/sess-schema-100',
+          id: 'sess-schema-100',
+          state: 'QUEUED',
+          title: 'Fix issue 100 [claimId: claim-100-test]'
+        })
+      };
+    }
+    throw new Error('Unexpected route: ' + url);
+  };
+
+  const providerClient = new JulesClient({ apiKey: 'my-key', fetchImpl: mockFetch });
+
+  const res = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    snapshot: mockSnapshot,
+    providerClient
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_SUCCESS);
+  assert.equal(res.session.id, 'sess-schema-100');
+  assert.ok(res.session.observedAt);
+});
+
+test('dispatchTask fails preflight gate if snapshot selection is blocked', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket({ issueNumber: 101 });
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const mockSnapshotBlocked = {
+    snapshotComplete: true,
+    issues: [
+      {
+        number: 101,
+        title: 'Fix issue 101',
+        state: 'open',
+        labels: ['roadmap-ready'],
+        body: '## Scope\nFix issue 101.'
+      }
+    ],
+    pullRequests: [
+      { number: 5, state: 'open', body: 'Closes #101' } // Open PR blocks issue 101
+    ],
+    sessions: [],
+    claims: []
+  };
+
+  const res = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    snapshot: mockSnapshotBlocked
+  });
+
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED);
 });
 
 test('dispatchTask creates a durable claim BEFORE provider session creation and links session ID', async () => {
@@ -95,13 +216,12 @@ test('dispatchTask creates a durable claim BEFORE provider session creation and 
         ok: true,
         json: async () => ({
           sources: [
-            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop' } }
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
           ]
         })
       };
     }
     if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
-      // Check if claim was already persisted in state store!
       const currentSnapshot = await stateAdapter.readState();
       claimWasCreatedBeforeSession = currentSnapshot.claims.length === 1 && currentSnapshot.claims[0].issueNumber === 100;
 
@@ -138,7 +258,7 @@ test('dispatchTask creates a durable claim BEFORE provider session creation and 
   assert.equal(finalState.claims[0].sessionId, 'sess-100');
 });
 
-test('dispatchTask handles timeout during session creation and reconciles 1 match successfully', async () => {
+test('dispatchTask handles timeout during session creation and reconciles 1 match successfully using exact marker', async () => {
   const config = sampleConfig();
   const packet = samplePacket({ issueNumber: 200, claimId: 'claim-200-timeout' });
   const stateAdapter = new InMemoryStateAdapter();
@@ -149,7 +269,7 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
         ok: true,
         json: async () => ({
           sources: [
-            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop' } }
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
           ]
         })
       };
@@ -160,7 +280,6 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
       throw err;
     }
     if (url.includes('/v1alpha/sessions') && options.method === 'GET') {
-      // Reconcile list sessions: returns 1 matching session
       return {
         ok: true,
         json: async () => ({
@@ -169,7 +288,21 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
               id: 'sess-reconciled-200',
               name: 'sessions/sess-reconciled-200',
               prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
-              state: 'QUEUED'
+              state: 'QUEUED',
+              sourceContext: {
+                source: 'sources/github/acme/autoloop',
+                githubRepoContext: { owner: 'acme', repo: 'autoloop', startingBranch: 'main' }
+              }
+            },
+            {
+              id: 'sess-foreign-repo',
+              name: 'sessions/sess-foreign',
+              prompt: 'Fix the bug in auth\n\nCorrelation: [claimId: claim-200-timeout]',
+              state: 'QUEUED',
+              sourceContext: {
+                source: 'sources/github/other/repo',
+                githubRepoContext: { owner: 'other', repo: 'repo', startingBranch: 'main' }
+              }
             }
           ]
         })
@@ -192,6 +325,51 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_AMBIGUOUS_RECONCILED);
   assert.equal(res.session.id, 'sess-reconciled-200');
   assert.equal(res.claim.sessionId, 'sess-reconciled-200');
+  assert.ok(res.session.observedAt);
+});
+
+test('dispatchTask blocks session with UNKNOWN normalized state', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket({ issueNumber: 250, claimId: 'claim-250-unknown' });
+  const stateAdapter = new InMemoryStateAdapter();
+
+  const mockFetch = async (url, options) => {
+    if (url.includes('/v1alpha/sources')) {
+      return {
+        ok: true,
+        json: async () => ({
+          sources: [
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
+          ]
+        })
+      };
+    }
+    if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'sessions/sess-unknown-state',
+          id: 'sess-unknown-state',
+          state: 'UNRECOGNIZED_PROVIDER_STATE'
+        })
+      };
+    }
+    throw new Error('Unexpected route: ' + url);
+  };
+
+  const providerClient = new JulesClient({ apiKey: 'my-key', fetchImpl: mockFetch });
+
+  const res = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    providerClient
+  });
+
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PROVIDER_FAILED);
+  assert.ok(res.session.observedAt);
 });
 
 test('dispatchTask handles timeout during session creation and blocks when 0 matches found', async () => {
@@ -205,7 +383,7 @@ test('dispatchTask handles timeout during session creation and blocks when 0 mat
         ok: true,
         json: async () => ({
           sources: [
-            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop' } }
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
           ]
         })
       };
@@ -234,7 +412,7 @@ test('dispatchTask handles timeout during session creation and blocks when 0 mat
 
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED);
-  assert.equal(res.claim.sessionId, null); // Session ID not set
+  assert.equal(res.claim.sessionId, null);
 });
 
 test('dispatchTask handles timeout during session creation and blocks when multiple matches found', async () => {
@@ -248,7 +426,7 @@ test('dispatchTask handles timeout during session creation and blocks when multi
         ok: true,
         json: async () => ({
           sources: [
-            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop' } }
+            { name: 'sources/github/acme/autoloop', githubRepo: { owner: 'acme', repo: 'autoloop', branches: ['main'] } }
           ]
         })
       };

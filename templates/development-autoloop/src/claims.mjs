@@ -1454,6 +1454,17 @@ export async function attachSessionToClaim({
       };
     }
 
+    const activeCheck = isClaimActive(currentClaim, currentDate);
+    if (!activeCheck.active || activeCheck.expired || currentClaim.status !== CLAIM_STATUS.ACTIVE || currentClaim.reconciliationStatus !== RECONCILIATION_STATUS.PENDING) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        reason: 'Claim ID ' + targetId + ' is not an unexpired active claim (' + (activeCheck.reason || 'inactive state') + '). Refusing to attach session.',
+        nextAction: 'Ensure claim is active and unexpired before attaching provider session.'
+      };
+    }
+
     if (currentClaim.sessionId === targetSessionId) {
       return {
         claim: currentClaim,
@@ -1494,7 +1505,17 @@ export async function attachSessionToClaim({
     const updatedClaims = [...existingClaims];
     updatedClaims[foundIndex] = updatedClaim;
 
-    const commitResult = await stateAdapter.commitStateChange(head, updatedClaims);
+    let commitResult;
+    try {
+      commitResult = await stateAdapter.commitStateChange(head, updatedClaims);
+    } catch (err) {
+      commitResult = {
+        success: false,
+        head: null,
+        reason: 'STORAGE_WRITE_EXCEPTION: ' + String(err?.message || err),
+        ambiguous: true
+      };
+    }
 
     if (commitResult.success) {
       return {
@@ -1506,7 +1527,7 @@ export async function attachSessionToClaim({
       };
     }
 
-    if (commitResult.ambiguous || commitResult.reason === 'STORAGE_WRITE_ERROR') {
+    if (commitResult.ambiguous || commitResult.reason === 'STORAGE_WRITE_ERROR' || String(commitResult.reason).startsWith('STORAGE_WRITE_EXCEPTION')) {
       let freshSnapshot;
       try {
         freshSnapshot = await stateAdapter.readState();
@@ -1515,7 +1536,7 @@ export async function attachSessionToClaim({
           claim: null,
           decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
           persistenceConfirmed: false,
-          reason: 'Session attachment write was ambiguous and read-back failed: ' + String(err?.message || err),
+          reason: 'Session attachment write was ambiguous/rejected and read-back failed: ' + String(err?.message || err),
           nextAction: 'Restore state access and verify session association for claim ' + targetId + '.'
         };
       }

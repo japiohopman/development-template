@@ -5,7 +5,8 @@
  */
 
 import { acquireClaim, attachSessionToClaim, normalizeRepositoryIdentity, CLAIM_CODES } from './claims.mjs';
-import { JulesClient, sanitizeJulesErrorMessage } from './jules.mjs';
+import { JulesClient, sanitizeJulesErrorMessage, JULES_STATE_NORMALIZED } from './jules.mjs';
+import { selectCandidateIssue } from './selection.mjs';
 
 export const DISPATCH_CODES = Object.freeze({
   DISPATCH_SUCCESS: 'DISPATCH_SUCCESS',
@@ -75,6 +76,8 @@ export async function dispatchTask({
   packet,
   confirmation,
   stateAdapter,
+  snapshot = null,
+  selectionResult = null,
   owner = 'autoloop-dispatch',
   providerClient = null,
   apiKey = null,
@@ -122,19 +125,20 @@ export async function dispatchTask({
     };
   }
 
-  const configuredProvider = String(config.provider || '').trim().toLowerCase();
+  // Read schema-canonical field names with fallback for options/backwards-compat
+  const configuredProvider = String(config.workProvider ?? config.provider ?? '').trim().toLowerCase();
   if (configuredProvider !== 'jules') {
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_UNSUPPORTED_PROVIDER,
-      reason: `Unsupported or unconfigured provider: '${config.provider}'.`,
+      reason: `Unsupported or unconfigured provider: '${config.workProvider ?? config.provider}'.`,
       session: null,
       claim: null
     };
   }
 
   // Exact confirmation check at both workflow and adapter boundary
-  const expectedConfirmation = config.confirmation;
+  const expectedConfirmation = config.requiredConfirmation ?? config.confirmation;
   if (typeof confirmation !== 'string' || confirmation !== expectedConfirmation) {
     return {
       success: false,
@@ -143,6 +147,25 @@ export async function dispatchTask({
       session: null,
       claim: null
     };
+  }
+
+  // Preflight and Issue Selection Gating
+  let evalSelection = selectionResult;
+  if (!evalSelection && snapshot) {
+    evalSelection = selectCandidateIssue(snapshot, config);
+  }
+
+  if (evalSelection) {
+    if (evalSelection.decisionCode !== 'CANDIDATE_SELECTED' || evalSelection.selectedCandidate?.number !== packet.issueNumber) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+        reason: `Preflight/selection gate blocked dispatch for Issue #${packet.issueNumber} (${evalSelection.decisionCode}): ${evalSelection.reason}`,
+        session: null,
+        claim: null,
+        selectionResult: evalSelection
+      };
+    }
   }
 
   const currentDate = new Date(now);
@@ -188,10 +211,10 @@ export async function dispatchTask({
     client = new JulesClient({ apiKey: key, fetchImpl });
   }
 
-  // Step 3: Resolve repository source on Jules API
+  // Step 3: Resolve repository source on Jules API and verify starting branch exists
   let source;
   try {
-    source = await client.findSourceForRepository(targetRepo);
+    source = await client.findSourceForRepository(targetRepo, packet.startingBranch);
   } catch (err) {
     return {
       success: false,
@@ -206,7 +229,7 @@ export async function dispatchTask({
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
-      reason: `No matching Jules source found for repository ${targetRepo.owner}/${targetRepo.repo}.`,
+      reason: `No matching Jules source found for repository ${targetRepo.owner}/${targetRepo.repo} with startingBranch '${packet.startingBranch}'.`,
       session: null,
       claim: activeClaim
     };
@@ -236,6 +259,19 @@ export async function dispatchTask({
 
   // Step 6: Handle successful session creation vs timeouts / ambiguities
   if (createdSession && createdSession.id) {
+    const observedAt = currentDate.toISOString();
+    const sessionWithObserved = { ...createdSession, observedAt };
+
+    if (createdSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+        reason: `Created session ${createdSession.id} returned an unknown or unparseable state ('${createdSession.state}'). Blocking progress.`,
+        session: sessionWithObserved,
+        claim: activeClaim
+      };
+    }
+
     // Attach session ID to claim
     const attachRes = await attachSessionToClaim({
       stateAdapter,
@@ -249,7 +285,7 @@ export async function dispatchTask({
         success: false,
         decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
         reason: `Session created (${createdSession.id}) but persisting session ID to claim failed: ${attachRes.reason}`,
-        session: createdSession,
+        session: sessionWithObserved,
         claim: activeClaim
       };
     }
@@ -258,7 +294,7 @@ export async function dispatchTask({
       success: true,
       decisionCode: DISPATCH_CODES.DISPATCH_SUCCESS,
       reason: `Successfully dispatched task and created Jules session ${createdSession.id}.`,
-      session: createdSession,
+      session: sessionWithObserved,
       claim: attachRes.claim
     };
   }
@@ -278,14 +314,45 @@ export async function dispatchTask({
     };
   }
 
+  const exactMarker = `[claimId: ${activeClaim.claimId}]`;
   const matchingSessions = existingSessions.filter((s) => {
-    const promptMatch = typeof s.prompt === 'string' && s.prompt.includes(activeClaim.claimId);
-    const titleMatch = typeof s.title === 'string' && s.title.includes(activeClaim.claimId);
-    return promptMatch || titleMatch;
+    // 1. Verify exact correlation marker in prompt or title
+    const promptMatch = typeof s.prompt === 'string' && s.prompt.includes(exactMarker);
+    const titleMatch = typeof s.title === 'string' && s.title.includes(exactMarker);
+    if (!promptMatch && !titleMatch) return false;
+
+    // 2. Verify source/repository identity if available on session context
+    const sSource = s.sourceContext?.source;
+    if (sSource && source.name && sSource !== source.name) return false;
+
+    const sRepoOwner = s.sourceContext?.githubRepoContext?.owner || s.githubRepo?.owner;
+    const sRepoName = s.sourceContext?.githubRepoContext?.repo || s.githubRepo?.repo;
+    if (sRepoOwner && sRepoOwner.toLowerCase() !== targetRepo.owner) return false;
+    if (sRepoName && sRepoName.toLowerCase() !== targetRepo.repo) return false;
+
+    // 3. Verify starting branch if available
+    const sBranch = s.sourceContext?.githubRepoContext?.startingBranch;
+    if (sBranch && sBranch !== packet.startingBranch) return false;
+
+    return true;
   });
 
   if (matchingSessions.length === 1) {
-    const reconciledSession = matchingSessions[0];
+    const reconciledSession = {
+      ...matchingSessions[0],
+      observedAt: currentDate.toISOString()
+    };
+
+    if (reconciledSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+        reason: `Reconciled session (${reconciledSession.id}) returned unknown state ('${reconciledSession.state}'). Blocking progress.`,
+        session: reconciledSession,
+        claim: activeClaim
+      };
+    }
+
     const attachRes = await attachSessionToClaim({
       stateAdapter,
       claimId: activeClaim.claimId,
