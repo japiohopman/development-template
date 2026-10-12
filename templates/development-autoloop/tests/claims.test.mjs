@@ -72,6 +72,24 @@ test('validateClaimRecord validates valid claims and rejects malformed fields', 
 
   const badRecon = validSampleClaim({ reconciliationStatus: 'INVALID' });
   assert.equal(validateClaimRecord(badRecon).valid, false);
+
+  const activeButReconciled = validSampleClaim({
+    status: CLAIM_STATUS.ACTIVE,
+    reconciliationStatus: RECONCILIATION_STATUS.RECONCILED
+  });
+  assert.equal(validateClaimRecord(activeButReconciled).valid, false);
+
+  const releasedButPending = validSampleClaim({
+    status: CLAIM_STATUS.RELEASED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  assert.equal(validateClaimRecord(releasedButPending).valid, false);
+
+  const expiredButReconciled = validSampleClaim({
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.RECONCILED
+  });
+  assert.equal(validateClaimRecord(expiredButReconciled).valid, false);
 });
 
 test('isClaimActive evaluates lease expiry and reconciliation status', () => {
