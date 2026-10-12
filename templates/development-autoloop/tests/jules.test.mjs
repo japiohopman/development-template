@@ -213,3 +213,29 @@ test('JulesClient propagates HTTP errors with sanitized messages', async () => {
     }
   );
 });
+
+
+test('JulesClient refuses to return a partial inventory when a later page fails', async () => {
+  let pageTwoRequested = false;
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async (url) => {
+      if (url.includes('pageToken=next-page')) {
+        pageTwoRequested = true;
+        return { ok: false, status: 503, statusText: 'Service unavailable', text: async () => 'temporary failure' };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          sources: [{ name: 'sources/github/acme/project', githubRepo: { owner: 'acme', repo: 'project' } }],
+          nextPageToken: 'next-page'
+        })
+      };
+    }
+  });
+  await assert.rejects(
+    () => client.listSources(),
+    (err) => err.code === 'JULES_HTTP_ERROR' && err.status === 503
+  );
+  assert.equal(pageTwoRequested, true);
+});
