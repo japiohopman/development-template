@@ -883,6 +883,7 @@ test('acquisition rejects invalid clock values and invalid lease durations witho
   const invalidOptions = [
     { now: 'not-a-timestamp' },
     { ttlMinutes: Infinity },
+    { ttlMinutes: Number.MAX_VALUE },
     { ttlMinutes: 0 },
     { ttlMinutes: -1 }
   ];
