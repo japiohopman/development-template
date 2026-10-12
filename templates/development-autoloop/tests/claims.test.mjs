@@ -67,6 +67,16 @@ test('validateClaimRecord validates valid claims and rejects malformed fields', 
   });
   assert.equal(validateClaimRecord(badDates).valid, false);
 
+  const nonIsoDate = validSampleClaim({ createdAt: 'March 31 2026' });
+  assert.equal(validateClaimRecord(nonIsoDate).valid, false);
+
+  const missingSessionId = validSampleClaim();
+  delete missingSessionId.sessionId;
+  assert.equal(validateClaimRecord(missingSessionId).valid, false);
+
+  const stringIssueNumber = validSampleClaim({ issueNumber: '101' });
+  assert.equal(validateClaimRecord(stringIssueNumber).valid, false);
+
   const badStatus = validSampleClaim({ status: 'UNKNOWN_STATUS' });
   assert.equal(validateClaimRecord(badStatus).valid, false);
 
@@ -840,4 +850,55 @@ test('ambiguous write cannot confirm an unrelated record that reuses the request
   assert.equal(result.persistenceConfirmed, false);
   assert.equal(result.safeToDispatch, false);
   assert.equal(result.claim, null);
+});
+
+
+test('acquisition rejects invalid clock values and invalid lease durations without writing state', async () => {
+  const invalidOptions = [
+    { now: 'not-a-timestamp' },
+    { ttlMinutes: Infinity },
+    { ttlMinutes: 0 },
+    { ttlMinutes: -1 }
+  ];
+  for (const options of invalidOptions) {
+    const stateAdapter = new InMemoryStateAdapter();
+    const result = await acquireClaim({
+      stateAdapter,
+      repository: 'acme/autoloop',
+      issueNumber: 505,
+      owner: 'run-invalid-time',
+      provider: 'jules',
+      ...options
+    });
+    assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+    assert.equal(result.persistenceConfirmed, false);
+    assert.equal((await stateAdapter.readState()).claims.length, 0);
+  }
+});
+
+test('recovery rejects an invalid clock value without changing the claim', async () => {
+  const staleClaim = validSampleClaim({
+    claimId: 'invalid-recovery-clock',
+    issueNumber: 506,
+    createdAt: '2026-03-31T07:00:00.000Z',
+    expiresAt: '2026-03-31T07:45:00.000Z',
+    status: CLAIM_STATUS.EXPIRED,
+    reconciliationStatus: RECONCILIATION_STATUS.PENDING
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [staleClaim], head: 'v1' });
+  const result = await reconcileAndRecoverClaim({
+    stateAdapter,
+    claimId: staleClaim.claimId,
+    evidence: {
+      verified: true,
+      sessions: { status: 'none' },
+      branches: { status: 'none' },
+      pullRequests: { status: 'none' }
+    },
+    now: 'not-a-timestamp'
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
+  assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
 });
