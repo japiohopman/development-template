@@ -932,6 +932,15 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     if (item.verified !== true) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must be explicitly verified.' };
     }
+    const domainRepo = normalizeRepositoryIdentity(item.repository).repository;
+    if (!domainRepo
+      || domainRepo.owner !== repoCheck.repository.owner
+      || domainRepo.repo !== repoCheck.repository.repo) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must identify the same repository as the top-level evidence.' };
+    }
+    if (item.issueNumber !== evidence.issueNumber) {
+      return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must identify the same Issue as the top-level evidence.' };
+    }
     const status = String(item.status ?? '').toLowerCase().trim();
     if (!domain.valid.has(status)) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' has an unknown/unsafe status (' + (status || 'unspecified') + ').' };
@@ -957,6 +966,13 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     }
     if (evidence.issueNumber !== expectedClaim.issueNumber) {
       return { verified: false, reason: 'Reconciliation evidence Issue number does not match the target claim.' };
+    }
+    if (expectedClaim.sessionId && evidence.sessions.sessionId !== expectedClaim.sessionId) {
+      return { verified: false, reason: 'Reconciliation evidence must reference the exact provider session recorded on the claim.' };
+    }
+    if (evidence.sessions.status !== 'none' && (!Object.hasOwn(evidence.sessions, 'sessionId')
+      || typeof evidence.sessions.sessionId !== 'string' || !evidence.sessions.sessionId.trim())) {
+      return { verified: false, reason: 'Terminal provider-session evidence must identify the exact session inspected.' };
     }
     const claimCreatedAt = Date.parse(expectedClaim.createdAt);
     if (verifiedAtMs < claimCreatedAt) {
