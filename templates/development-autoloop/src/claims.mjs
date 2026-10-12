@@ -102,27 +102,8 @@ function sortDiagnostics(errors) {
 }
 
 function isValidIsoTimestamp(str) {
-  if (typeof str !== 'string') return false;
-  const match = str.match(/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(?:\.(?<fraction>\d{1,9}))?(?<zone>Z|(?<sign>[+-])(?<offsetHour>\d{2}):(?<offsetMinute>\d{2}))$/);
-  if (!match) return false;
-
-  const parts = match.groups;
-  const year = Number(parts.year);
-  const month = Number(parts.month);
-  const day = Number(parts.day);
-  const hour = Number(parts.hour);
-  const minute = Number(parts.minute);
-  const second = Number(parts.second);
-  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
-
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (day < 1 || day > daysInMonth[month - 1]) return false;
-
-  if (parts.zone !== 'Z') {
-    const offsetHour = Number(parts.offsetHour);
-    const offsetMinute = Number(parts.offsetMinute);
-    if (offsetMinute > 59 || offsetHour > 14 || (offsetHour === 14 && offsetMinute !== 0)) return false;
+  if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(str)) {
+    return false;
   }
   return Number.isFinite(Date.parse(str));
 }
@@ -145,8 +126,7 @@ export function normalizeRepositoryIdentity(repoInput) {
   } else if (repoInput && typeof repoInput === 'object' && !Array.isArray(repoInput)) {
     const owner = typeof repoInput.owner === 'string' ? repoInput.owner.trim().toLowerCase() : '';
     const repo = typeof repoInput.repo === 'string' ? repoInput.repo.trim().toLowerCase() : '';
-    if (owner && repo && !owner.includes('/') && !repo.includes('/')
-      && !/\s/.test(owner) && !/\s/.test(repo)) {
+    if (owner && repo) {
       return { valid: true, repository: { owner, repo } };
     }
   }
@@ -965,10 +945,6 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     if (!domain.valid.has(status)) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' has an unknown/unsafe status (' + (status || 'unspecified') + ').' };
     }
-    if (domain.key === 'sessions' && status !== 'none'
-      && (typeof item.sessionId !== 'string' || !item.sessionId.trim())) {
-      return { verified: false, reason: 'Terminal provider-session evidence must identify the exact session inspected.' };
-    }
     if (typeof item.source !== 'string' || !item.source.trim()) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' must identify the source inspected.' };
     }
@@ -978,6 +954,11 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     if (Date.parse(item.observedAt) > verifiedAtMs) {
       return { verified: false, reason: 'Reconciliation evidence for ' + domain.label + ' cannot be observed after verifiedAt.' };
     }
+  }
+
+  if (evidence.sessions.status !== 'none' && (!Object.hasOwn(evidence.sessions, 'sessionId')
+    || typeof evidence.sessions.sessionId !== 'string' || !evidence.sessions.sessionId.trim())) {
+    return { verified: false, reason: 'Terminal provider-session evidence must identify the exact session inspected.' };
   }
 
   if (expectedClaim) {
@@ -993,10 +974,6 @@ export function validateReconciliationEvidence(evidence, expectedClaim = null, n
     }
     if (expectedClaim.sessionId && evidence.sessions.sessionId !== expectedClaim.sessionId) {
       return { verified: false, reason: 'Reconciliation evidence must reference the exact provider session recorded on the claim.' };
-    }
-    if (evidence.sessions.status !== 'none' && (!Object.hasOwn(evidence.sessions, 'sessionId')
-      || typeof evidence.sessions.sessionId !== 'string' || !evidence.sessions.sessionId.trim())) {
-      return { verified: false, reason: 'Terminal provider-session evidence must identify the exact session inspected.' };
     }
     const claimCreatedAt = Date.parse(expectedClaim.createdAt);
     if (verifiedAtMs < claimCreatedAt) {
