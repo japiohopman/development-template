@@ -166,7 +166,31 @@ export class JulesClient {
   }
 
   /**
+   * Get full details for a single source by name or ID.
+   * GET /v1alpha/sources/{sourceId}
+   * @param {string} sourceNameOrId Resource name (e.g. 'sources/github/owner/repo') or ID
+   * @returns {Promise<object>} Full source record
+   */
+  async getSource(sourceNameOrId) {
+    if (typeof sourceNameOrId !== 'string' || !sourceNameOrId.trim()) {
+      throw new Error('sourceNameOrId is required.');
+    }
+    const path = sourceNameOrId.startsWith('sources/')
+      ? '/v1alpha/' + sourceNameOrId.trim()
+      : '/v1alpha/sources/' + encodeURIComponent(sourceNameOrId.trim());
+
+    const res = await this._request(path, { method: 'GET' });
+    if (!res || typeof res !== 'object') {
+      const err = new Error('Jules getSource returned non-object response.');
+      err.code = 'JULES_MALFORMED_RESPONSE';
+      throw err;
+    }
+    return res;
+  }
+
+  /**
    * Find source for exact repository identity (owner/repo) and verify starting branch exists.
+   * If branch information is missing on summary list item, fetches full source details using `getSource`.
    * @param {*} repository
    * @param {string} [startingBranch] Optional starting branch to verify
    * @returns {Promise<object|null>} Matched source object or null
@@ -179,17 +203,31 @@ export class JulesClient {
     const target = repoCheck.repository;
     const sources = await this.listSources();
 
-    for (const src of sources) {
-      const srcOwner = src?.githubRepo?.owner;
-      const srcRepo = src?.githubRepo?.repo;
+    for (const srcSummary of sources) {
+      const srcOwner = srcSummary?.githubRepo?.owner;
+      const srcRepo = srcSummary?.githubRepo?.repo;
       if (typeof srcOwner === 'string' && typeof srcRepo === 'string') {
         if (srcOwner.trim().toLowerCase() === target.owner && srcRepo.trim().toLowerCase() === target.repo) {
+          let fullSource = srcSummary;
+          let branches = Array.isArray(srcSummary?.githubRepo?.branches)
+            ? srcSummary.githubRepo.branches
+            : (Array.isArray(srcSummary?.branches) ? srcSummary.branches : null);
+
+          // If branch info is missing from summary list item and startingBranch is requested, fetch full source details
+          if (startingBranch && (!branches || branches.length === 0) && srcSummary.name) {
+            try {
+              fullSource = await this.getSource(srcSummary.name);
+              branches = Array.isArray(fullSource?.githubRepo?.branches)
+                ? fullSource.githubRepo.branches
+                : (Array.isArray(fullSource?.branches) ? fullSource.branches : null);
+            } catch {
+              // If fetching full source details fails, fail closed for branch verification
+              return null;
+            }
+          }
+
           if (startingBranch) {
             const targetBranch = startingBranch.trim();
-            const branches = Array.isArray(src?.githubRepo?.branches)
-              ? src.githubRepo.branches
-              : (Array.isArray(src?.branches) ? src.branches : null);
-
             if (!branches || branches.length === 0) {
               return null;
             }
@@ -203,7 +241,7 @@ export class JulesClient {
               return null;
             }
           }
-          return src;
+          return fullSource;
         }
       }
     }

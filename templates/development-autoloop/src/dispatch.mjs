@@ -77,7 +77,6 @@ export async function dispatchTask({
   confirmation,
   stateAdapter,
   snapshot = null,
-  selectionResult = null,
   owner = 'autoloop-dispatch',
   providerClient = null,
   apiKey = null,
@@ -149,22 +148,18 @@ export async function dispatchTask({
     };
   }
 
-  // Mandatory Preflight and Issue Selection Gate
-  let evalSelection = selectionResult;
-  if (!evalSelection && snapshot) {
-    evalSelection = selectCandidateIssue(snapshot, config);
-  }
-
-  if (!evalSelection) {
+  // Mandatory Preflight and Issue Selection Gate recomputed from snapshot (never trust caller selectionResult)
+  if (!snapshot) {
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
-      reason: 'Preflight/selection gate evidence (snapshot or selectionResult) is required but missing.',
+      reason: 'Preflight/selection gate evidence (authoritative snapshot) is required but missing.',
       session: null,
       claim: null
     };
   }
 
+  const evalSelection = selectCandidateIssue(snapshot, config);
   if (evalSelection.decisionCode !== 'CANDIDATE_SELECTED' || evalSelection.selectedCandidate?.number !== packet.issueNumber) {
     return {
       success: false,

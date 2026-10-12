@@ -41,13 +41,21 @@ function sampleConfig(overrides = {}) {
   };
 }
 
-function sampleSelectionResult(overrides = {}) {
+function sampleSnapshot(issueNumber = 42) {
   return {
-    selectedCandidate: { number: 42, title: 'Fix issue 42' },
-    decisionCode: 'CANDIDATE_SELECTED',
-    reason: 'Candidate Issue #42 selected for execution.',
-    safeToDispatch: false,
-    ...overrides
+    snapshotComplete: true,
+    issues: [
+      {
+        number: issueNumber,
+        title: 'Fix issue ' + issueNumber,
+        state: 'open',
+        labels: ['roadmap-ready'],
+        body: '## Scope\nFix issue.'
+      }
+    ],
+    pullRequests: [],
+    sessions: [],
+    claims: []
   };
 }
 
@@ -77,7 +85,7 @@ test('dispatchTask fails when autoloop is disabled', async () => {
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
-  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter, selectionResult: sampleSelectionResult() });
+  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter, snapshot: sampleSnapshot(42) });
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_DISABLED);
 });
@@ -87,7 +95,7 @@ test('dispatchTask fails when requiredConfirmation is empty or missing', async (
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
-  const res = await dispatchTask({ config, packet, confirmation: '', stateAdapter, selectionResult: sampleSelectionResult() });
+  const res = await dispatchTask({ config, packet, confirmation: '', stateAdapter, snapshot: sampleSnapshot(42) });
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID);
 });
@@ -122,7 +130,7 @@ test('dispatchTask fails setup when source is missing and creates zero claim wri
     packet,
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult(),
+    snapshot: sampleSnapshot(42),
     providerClient
   });
 
@@ -136,7 +144,7 @@ test('dispatchTask fails when runMode is dry-run', async () => {
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
-  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter });
+  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter, snapshot: sampleSnapshot(42) });
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_DRY_RUN);
 });
@@ -146,7 +154,7 @@ test('dispatchTask fails when provider is not jules', async () => {
   const packet = samplePacket();
   const stateAdapter = new InMemoryStateAdapter();
 
-  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter });
+  const res = await dispatchTask({ config, packet, confirmation: 'DISPATCH', stateAdapter, snapshot: sampleSnapshot(42) });
   assert.equal(res.success, false);
   assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_UNSUPPORTED_PROVIDER);
 });
@@ -158,7 +166,7 @@ test('dispatchTask fails closed on non-exact confirmation string', async () => {
 
   const confirmations = ['dispatch', 'DISPATCH ', ' DISPATCH', 'DISPATCH\n', 'dispatch_now'];
   for (const c of confirmations) {
-    const res = await dispatchTask({ config, packet, confirmation: c, stateAdapter });
+    const res = await dispatchTask({ config, packet, confirmation: c, stateAdapter, snapshot: sampleSnapshot(42) });
     assert.equal(res.success, false);
     assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID);
   }
@@ -304,7 +312,7 @@ test('dispatchTask creates a durable claim BEFORE provider session creation and 
     packet: samplePacket({ issueNumber: 100, claimId: 'claim-100-test' }),
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 100 } }),
+    snapshot: sampleSnapshot(100),
     providerClient
   });
 
@@ -398,10 +406,10 @@ test('dispatchTask handles timeout during session creation and reconciles 1 matc
 
   const res = await dispatchTask({
     config,
-    packet,
+    packet: samplePacket({ issueNumber: 200, claimId: 'claim-200-timeout' }),
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 200 } }),
+    snapshot: sampleSnapshot(200),
     providerClient
   });
 
@@ -445,10 +453,10 @@ test('dispatchTask blocks session with UNKNOWN normalized state', async () => {
 
   const res = await dispatchTask({
     config,
-    packet,
+    packet: samplePacket({ issueNumber: 250, claimId: 'claim-250-unknown' }),
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 250 } }),
+    snapshot: sampleSnapshot(250),
     providerClient
   });
 
@@ -489,10 +497,10 @@ test('dispatchTask handles timeout during session creation and blocks when 0 mat
 
   const res = await dispatchTask({
     config,
-    packet,
+    packet: samplePacket({ issueNumber: 300, claimId: 'claim-300-timeout' }),
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 300 } }),
+    snapshot: sampleSnapshot(300),
     providerClient
   });
 
@@ -554,10 +562,10 @@ test('dispatchTask handles timeout during session creation and blocks when multi
 
   const res = await dispatchTask({
     config,
-    packet,
+    packet: samplePacket({ issueNumber: 400, claimId: 'claim-400-dup' }),
     confirmation: 'DISPATCH',
     stateAdapter,
-    selectionResult: sampleSelectionResult({ selectedCandidate: { number: 400 } }),
+    snapshot: sampleSnapshot(400),
     providerClient
   });
 

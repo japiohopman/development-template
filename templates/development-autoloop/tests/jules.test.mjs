@@ -71,25 +71,52 @@ test('JulesClient listSources handles pagination and verifies branch if specifie
   assert.equal(noBranchMatch, null);
 });
 
-test('JulesClient findSourceForRepository rejects when source branches array is missing or empty', async () => {
-  const mockFetch = async () => {
+test('JulesClient getSource fetches source details and findSourceForRepository uses it when summary lacks branches', async () => {
+  const mockFetch = async (url) => {
+    if (url.includes('/v1alpha/sources/github/acme/summary-only')) {
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'sources/github/acme/summary-only',
+          githubRepo: { owner: 'acme', repo: 'summary-only', branches: ['main', 'develop'] }
+        })
+      };
+    }
     return {
       ok: true,
       json: async () => ({
         sources: [
-          { name: 'sources/github/acme/no-branches', githubRepo: { owner: 'acme', repo: 'no-branches', branches: [] } },
-          { name: 'sources/github/acme/null-branches', githubRepo: { owner: 'acme', repo: 'null-branches' } }
+          { name: 'sources/github/acme/summary-only', githubRepo: { owner: 'acme', repo: 'summary-only' } }
         ]
       })
     };
   };
 
   const client = new JulesClient({ apiKey: 'test-key', fetchImpl: mockFetch });
-  const res1 = await client.findSourceForRepository('acme/no-branches', 'main');
-  assert.equal(res1, null);
+  const fetchedDetails = await client.getSource('sources/github/acme/summary-only');
+  assert.equal(fetchedDetails.name, 'sources/github/acme/summary-only');
 
-  const res2 = await client.findSourceForRepository('acme/null-branches', 'main');
-  assert.equal(res2, null);
+  const match = await client.findSourceForRepository('acme/summary-only', 'main');
+  assert.equal(match.name, 'sources/github/acme/summary-only');
+  assert.deepEqual(match.githubRepo.branches, ['main', 'develop']);
+});
+
+test('JulesClient tests HTTP 401/403/429/500 failure responses', async () => {
+  const statuses = [401, 403, 429, 500, 503];
+  for (const status of statuses) {
+    const mockFetch = async () => ({
+      ok: false,
+      status,
+      statusText: 'HTTP Error ' + status,
+      text: async () => 'Error body for ' + status
+    });
+
+    const client = new JulesClient({ apiKey: 'test-key', fetchImpl: mockFetch });
+    await assert.rejects(
+      async () => client.listSources(),
+      (err) => err.code === 'JULES_HTTP_ERROR' && err.status === status
+    );
+  }
 });
 
 test('JulesClient _request enforces redirect: error', async () => {
