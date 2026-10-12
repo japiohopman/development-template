@@ -619,12 +619,14 @@ test('recovery cannot release an unexpired active claim', async () => {
   const result = await reconcileAndRecoverClaim({
     stateAdapter,
     claimId: activeClaim.claimId,
-    evidence: {
-      verified: true,
+    evidence: verifiedEvidence({
+      claimId: activeClaim.claimId,
+      issueNumber: 77,
+      verifiedAt: '2026-03-31T10:10:00.000Z',
       sessions: { status: 'terminal' },
       branches: { status: 'clean' },
       pullRequests: { status: 'merged' }
-    },
+    }),
     targetStatus: CLAIM_STATUS.RELEASED,
     now: new Date('2026-03-31T10:15:00.000Z')
   });
