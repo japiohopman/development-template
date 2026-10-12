@@ -19,7 +19,7 @@ Blocked and escalated are explicit outcomes, not hidden retries. A material scop
 8. **Recovery/diagnostics:** record block reason, IDs, run timestamp, mutations, and next safe action.
 
 ## Current implementation
-The code currently implements layers 1 (configuration validation), 2 (read-only preflight and pagination), 3 (pure preflight decision functions), 4 (deterministic issue selection and dependency validation), 5 (versioned durable claim store and stale-claim recovery), and 6 (provider-neutral dispatch and safely gated Jules REST adapter). Layers 7–8 require additional work before live dispatch is enabled.
+The code contains implementations for layers 1–6, including provider-neutral dispatch and a Jules REST adapter, but the adapter remains review-gated until authoritative source identity, lifecycle persistence, timeout/failure behavior, documentation, and exact-head verification satisfy Issue #5. Layers 7–8 also require additional work. This is not pilot-ready and live/scheduled dispatch must remain disabled.
 
 ## State and concurrency
 Do not push transient queue-state files to the protected default branch. State writes target a dedicated, configurable state branch (`autoloop-state`).
