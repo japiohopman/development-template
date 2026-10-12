@@ -13,7 +13,8 @@ import {
   acquireClaim,
   inspectClaim,
   validateReconciliationEvidence,
-  reconcileAndRecoverClaim
+  reconcileAndRecoverClaim,
+  attachSessionToClaim
 } from '../src/claims.mjs';
 
 function validSampleClaim(overrides = {}) {
@@ -947,6 +948,58 @@ test('recovery rejects an invalid clock value without changing the claim', async
   const snapshot = await stateAdapter.readState();
   assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
   assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
+});
+
+test('attachSessionToClaim attaches session ID to existing active claim', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-1', sessionId: null });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-1',
+    sessionId: 'session-xyz-123',
+    now: new Date('2026-03-31T10:05:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-xyz-123');
+
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].sessionId, 'session-xyz-123');
+});
+
+test('attachSessionToClaim is idempotent when same session ID is provided', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-2', sessionId: 'session-xyz-123' });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-2',
+    sessionId: 'session-xyz-123'
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-xyz-123');
+});
+
+test('attachSessionToClaim rejects overwriting with a different session ID', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-3', sessionId: 'session-existing' });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-3',
+    sessionId: 'session-new-different'
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_CONFLICT);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-existing');
+
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].sessionId, 'session-existing');
 });
 
 

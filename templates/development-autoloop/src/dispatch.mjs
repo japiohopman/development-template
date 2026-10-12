@@ -1,0 +1,333 @@
+/**
+ * Provider-neutral dispatch orchestration.
+ * Enforces fail-closed gating (confirmation, dry-run, provider type, claims, preflight/selection)
+ * before any mutating provider session creation.
+ */
+
+import { acquireClaim, attachSessionToClaim, normalizeRepositoryIdentity, CLAIM_CODES } from './claims.mjs';
+import { JulesClient, sanitizeJulesErrorMessage } from './jules.mjs';
+
+export const DISPATCH_CODES = Object.freeze({
+  DISPATCH_SUCCESS: 'DISPATCH_SUCCESS',
+  DISPATCH_DRY_RUN: 'DISPATCH_DRY_RUN',
+  DISPATCH_DISABLED: 'DISPATCH_DISABLED',
+  DISPATCH_UNSUPPORTED_PROVIDER: 'DISPATCH_UNSUPPORTED_PROVIDER',
+  DISPATCH_CONFIRMATION_INVALID: 'DISPATCH_CONFIRMATION_INVALID',
+  DISPATCH_PREFLIGHT_BLOCKED: 'DISPATCH_PREFLIGHT_BLOCKED',
+  DISPATCH_CLAIM_FAILED: 'DISPATCH_CLAIM_FAILED',
+  DISPATCH_PROVIDER_FAILED: 'DISPATCH_PROVIDER_FAILED',
+  DISPATCH_AMBIGUOUS_RECONCILED: 'DISPATCH_AMBIGUOUS_RECONCILED',
+  DISPATCH_AMBIGUOUS_BLOCKED: 'DISPATCH_AMBIGUOUS_BLOCKED',
+  DISPATCH_INVALID_PACKET: 'DISPATCH_INVALID_PACKET'
+});
+
+/**
+ * Validate a dispatch packet structure.
+ * @param {*} packet
+ * @returns {{ valid: boolean, reason?: string }}
+ */
+export function validateDispatchPacket(packet) {
+  if (!packet || typeof packet !== 'object' || Array.isArray(packet)) {
+    return { valid: false, reason: 'Dispatch packet must be a non-null object.' };
+  }
+
+  const repoCheck = normalizeRepositoryIdentity(packet.repository);
+  if (!repoCheck.valid) {
+    return { valid: false, reason: 'Dispatch packet must contain a valid repository identity.' };
+  }
+
+  if (typeof packet.issueNumber !== 'number' || !Number.isInteger(packet.issueNumber) || packet.issueNumber < 1) {
+    return { valid: false, reason: 'Dispatch packet must contain a positive integer issueNumber.' };
+  }
+
+  if (typeof packet.issueTitle !== 'string' || !packet.issueTitle.trim()) {
+    return { valid: false, reason: 'Dispatch packet must contain a non-empty issueTitle.' };
+  }
+
+  if (typeof packet.startingBranch !== 'string' || !packet.startingBranch.trim()) {
+    return { valid: false, reason: 'Dispatch packet must contain a non-empty startingBranch.' };
+  }
+
+  if (typeof packet.prompt !== 'string' || !packet.prompt.trim()) {
+    return { valid: false, reason: 'Dispatch packet must contain a non-empty prompt.' };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Perform provider-neutral dispatch for an issue execution packet.
+ *
+ * @param {object} options
+ * @param {object} options.config Autoloop configuration object
+ * @param {object} options.packet Dispatch packet
+ * @param {string} options.confirmation Confirmation string passed at invocation boundary
+ * @param {object} options.stateAdapter Durable claim state store adapter
+ * @param {string} [options.owner='autoloop-dispatch'] Owner string acquiring the claim
+ * @param {object} [options.providerClient] Injected JulesClient (or created if apiKey provided)
+ * @param {string} [options.apiKey] Jules API key (if providerClient not provided)
+ * @param {Function} [options.fetchImpl] Fetch implementation for provider calls
+ * @param {Date|string|number} [options.now=new Date()] Current timestamp
+ * @returns {Promise<object>} Dispatch result
+ */
+export async function dispatchTask({
+  config,
+  packet,
+  confirmation,
+  stateAdapter,
+  owner = 'autoloop-dispatch',
+  providerClient = null,
+  apiKey = null,
+  fetchImpl = globalThis.fetch,
+  now = new Date()
+}) {
+  const packetCheck = validateDispatchPacket(packet);
+  if (!packetCheck.valid) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_INVALID_PACKET,
+      reason: packetCheck.reason,
+      session: null,
+      claim: null
+    };
+  }
+
+  if (!config || typeof config !== 'object') {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+      reason: 'Configuration object is missing or invalid.',
+      session: null,
+      claim: null
+    };
+  }
+
+  if (config.enabled !== true) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_DISABLED,
+      reason: 'Autoloop is disabled in configuration.',
+      session: null,
+      claim: null
+    };
+  }
+
+  if (config.runMode !== 'live') {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_DRY_RUN,
+      reason: 'Autoloop runMode is dry-run.',
+      session: null,
+      claim: null
+    };
+  }
+
+  const configuredProvider = String(config.provider || '').trim().toLowerCase();
+  if (configuredProvider !== 'jules') {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_UNSUPPORTED_PROVIDER,
+      reason: `Unsupported or unconfigured provider: '${config.provider}'.`,
+      session: null,
+      claim: null
+    };
+  }
+
+  // Exact confirmation check at both workflow and adapter boundary
+  const expectedConfirmation = config.confirmation;
+  if (typeof confirmation !== 'string' || confirmation !== expectedConfirmation) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID,
+      reason: 'Dispatch confirmation does not match configured confirmation exactly.',
+      session: null,
+      claim: null
+    };
+  }
+
+  const currentDate = new Date(now);
+  const targetRepo = normalizeRepositoryIdentity(packet.repository).repository;
+
+  // Step 1: Acquire durable claim BEFORE calling provider create
+  const claimId = packet.claimId || `claim-${packet.issueNumber}-${currentDate.getTime()}`;
+  const claimRes = await acquireClaim({
+    stateAdapter,
+    repository: targetRepo,
+    issueNumber: packet.issueNumber,
+    owner,
+    provider: configuredProvider,
+    claimId,
+    now: currentDate
+  });
+
+  if (!claimRes.safeToDispatch || claimRes.decisionCode !== CLAIM_CODES.CLAIM_ACQUIRED) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_CLAIM_FAILED,
+      reason: `Durable claim acquisition failed (${claimRes.decisionCode}): ${claimRes.reason}`,
+      session: null,
+      claim: claimRes.claim
+    };
+  }
+
+  const activeClaim = claimRes.claim;
+
+  // Step 2: Initialize provider client
+  let client = providerClient;
+  if (!client) {
+    const key = apiKey || process.env.JULES_API_KEY;
+    if (!key) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+        reason: 'Jules API key is missing from secrets or environment.',
+        session: null,
+        claim: activeClaim
+      };
+    }
+    client = new JulesClient({ apiKey: key, fetchImpl });
+  }
+
+  // Step 3: Resolve repository source on Jules API
+  let source;
+  try {
+    source = await client.findSourceForRepository(targetRepo);
+  } catch (err) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+      reason: 'Failed to resolve Jules repository source: ' + sanitizeJulesErrorMessage(err, client.apiKey),
+      session: null,
+      claim: activeClaim
+    };
+  }
+
+  if (!source) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PROVIDER_FAILED,
+      reason: `No matching Jules source found for repository ${targetRepo.owner}/${targetRepo.repo}.`,
+      session: null,
+      claim: activeClaim
+    };
+  }
+
+  // Step 4: Construct safe task prompt with correlation marker
+  const correlationMarker = `[claimId: ${activeClaim.claimId}]`;
+  const fullPrompt = `${packet.prompt.trim()}\n\nCorrelation: ${correlationMarker}`;
+  const sessionTitle = packet.issueTitle.includes(correlationMarker)
+    ? packet.issueTitle
+    : `${packet.issueTitle} ${correlationMarker}`;
+
+  // Step 5: Attempt Jules session creation
+  let createdSession = null;
+  let createError = null;
+
+  try {
+    createdSession = await client.createSession({
+      sourceName: source.name,
+      startingBranch: packet.startingBranch,
+      prompt: fullPrompt,
+      title: sessionTitle
+    });
+  } catch (err) {
+    createError = err;
+  }
+
+  // Step 6: Handle successful session creation vs timeouts / ambiguities
+  if (createdSession && createdSession.id) {
+    // Attach session ID to claim
+    const attachRes = await attachSessionToClaim({
+      stateAdapter,
+      claimId: activeClaim.claimId,
+      sessionId: createdSession.id,
+      now: currentDate
+    });
+
+    if (attachRes.decisionCode !== CLAIM_CODES.CLAIM_SESSION_ASSOCIATED) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+        reason: `Session created (${createdSession.id}) but persisting session ID to claim failed: ${attachRes.reason}`,
+        session: createdSession,
+        claim: activeClaim
+      };
+    }
+
+    return {
+      success: true,
+      decisionCode: DISPATCH_CODES.DISPATCH_SUCCESS,
+      reason: `Successfully dispatched task and created Jules session ${createdSession.id}.`,
+      session: createdSession,
+      claim: attachRes.claim
+    };
+  }
+
+  // Session creation failed or was ambiguous / timed out.
+  // Reconcile by listing sessions and searching for correlationMarker.
+  let existingSessions = [];
+  try {
+    existingSessions = await client.listSessions();
+  } catch (reconErr) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+      reason: `Session creation failed/timed out (${sanitizeJulesErrorMessage(createError, client.apiKey)}) and session list reconciliation also failed (${sanitizeJulesErrorMessage(reconErr, client.apiKey)}).`,
+      session: null,
+      claim: activeClaim
+    };
+  }
+
+  const matchingSessions = existingSessions.filter((s) => {
+    const promptMatch = typeof s.prompt === 'string' && s.prompt.includes(activeClaim.claimId);
+    const titleMatch = typeof s.title === 'string' && s.title.includes(activeClaim.claimId);
+    return promptMatch || titleMatch;
+  });
+
+  if (matchingSessions.length === 1) {
+    const reconciledSession = matchingSessions[0];
+    const attachRes = await attachSessionToClaim({
+      stateAdapter,
+      claimId: activeClaim.claimId,
+      sessionId: reconciledSession.id,
+      now: currentDate
+    });
+
+    if (attachRes.decisionCode !== CLAIM_CODES.CLAIM_SESSION_ASSOCIATED) {
+      return {
+        success: false,
+        decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+        reason: `Reconciled single matching session (${reconciledSession.id}) after create timeout, but attaching session ID failed: ${attachRes.reason}`,
+        session: reconciledSession,
+        claim: activeClaim
+      };
+    }
+
+    return {
+      success: true,
+      decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_RECONCILED,
+      reason: `Session creation response was ambiguous/failed, but reconciliation confirmed existing session ${reconciledSession.id}.`,
+      session: reconciledSession,
+      claim: attachRes.claim
+    };
+  }
+
+  if (matchingSessions.length > 1) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+      reason: `Session creation was ambiguous and reconciliation found multiple (${matchingSessions.length}) matching sessions for claim ${activeClaim.claimId}. Blocking to prevent duplicate work.`,
+      session: null,
+      claim: activeClaim
+    };
+  }
+
+  // matchingSessions.length === 0
+  return {
+    success: false,
+    decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
+    reason: `Session creation failed/timed out (${sanitizeJulesErrorMessage(createError, client.apiKey)}) and no matching session was found on read-back. Preserving blocked state to avoid duplicate dispatch.`,
+    session: null,
+    claim: activeClaim
+  };
+}

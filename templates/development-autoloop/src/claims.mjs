@@ -27,7 +27,9 @@ export const CLAIM_CODES = Object.freeze({
   CLAIM_PERSISTENCE_FAILED: 'CLAIM_PERSISTENCE_FAILED',
   CLAIM_RECOVERY_BLOCKED: 'CLAIM_RECOVERY_BLOCKED',
   CLAIM_RECOVERED: 'CLAIM_RECOVERED',
-  CLAIM_NOT_FOUND: 'CLAIM_NOT_FOUND'
+  CLAIM_NOT_FOUND: 'CLAIM_NOT_FOUND',
+  CLAIM_SESSION_ASSOCIATED: 'CLAIM_SESSION_ASSOCIATED',
+  CLAIM_SESSION_CONFLICT: 'CLAIM_SESSION_CONFLICT'
 });
 
 const VALID_STATUSES = new Set(Object.values(CLAIM_STATUS));
@@ -1325,5 +1327,237 @@ export async function reconcileAndRecoverClaim({
     safeToDispatch: false,
     reason: 'Exhausted max CAS retries (' + maxRetries + ') during claim reconciliation.',
     nextAction: 'Retry claim reconciliation after concurrent state updates settle.'
+  };
+}
+
+/**
+ * Safely attach a provider session ID to an existing active claim using CAS.
+ * If the claim already has the exact same session ID, returns success without duplicating work.
+ * If the claim already has a DIFFERENT non-null session ID, blocks with CLAIM_SESSION_CONFLICT.
+ *
+ * @param {object} options
+ * @param {object} options.stateAdapter
+ * @param {string} options.claimId
+ * @param {string} options.sessionId
+ * @param {number} [options.maxRetries=3]
+ * @param {Date|string|number} [options.now=new Date()]
+ * @returns {Promise<object>} Outcome report
+ */
+export async function attachSessionToClaim({
+  stateAdapter,
+  claimId,
+  sessionId,
+  maxRetries = 3,
+  now = new Date()
+}) {
+  if (!stateAdapter || typeof stateAdapter.readState !== 'function' || typeof stateAdapter.commitStateChange !== 'function') {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      reason: 'A valid stateAdapter with readState and commitStateChange methods is required.',
+      nextAction: 'Provide a valid state store adapter.'
+    };
+  }
+
+  if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > MAX_CAS_RETRIES) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      reason: 'maxRetries must be an integer between 0 and ' + MAX_CAS_RETRIES + '.',
+      nextAction: 'Use a finite retry limit within the documented hard cap.'
+    };
+  }
+
+  if (typeof claimId !== 'string' || !claimId.trim()) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      reason: 'claimId must be a non-empty string.',
+      nextAction: 'Provide a valid claim ID.'
+    };
+  }
+
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      reason: 'sessionId must be a non-empty string.',
+      nextAction: 'Provide a valid provider session ID.'
+    };
+  }
+
+  const targetId = claimId.trim();
+  const targetSessionId = sessionId.trim();
+
+  const currentDate = new Date(now);
+  if (!Number.isFinite(currentDate.getTime())) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      reason: 'now must be a valid timestamp.',
+      nextAction: 'Provide a valid timestamp and retry.'
+    };
+  }
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let snapshot;
+    try {
+      snapshot = await stateAdapter.readState();
+    } catch (err) {
+      const invalid = err?.code === 'INVALID_STATE_STORE';
+      return {
+        claim: null,
+        decisionCode: invalid ? CLAIM_CODES.CLAIM_INVALID_STATE : CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+        persistenceConfirmed: false,
+        reason: 'Could not read authoritative claim state: ' + String(err?.message || err),
+        nextAction: invalid ? 'Repair the malformed state store before retrying.' : 'Restore state-store access and retry after read-only reconciliation.'
+      };
+    }
+
+    const snapshotCheck = validateStateSnapshot(snapshot);
+    if (!snapshotCheck.valid) {
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        reason: snapshotCheck.reason,
+        nextAction: 'Repair or reconcile invalid state records before retrying.'
+      };
+    }
+    const { head, claims: existingClaims } = snapshot;
+
+    const foundIndex = existingClaims.findIndex((c) => c.claimId === targetId);
+    if (foundIndex === -1) {
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_NOT_FOUND,
+        persistenceConfirmed: false,
+        reason: 'Claim ID ' + targetId + ' was not found in state store.',
+        nextAction: 'Verify claim ID.'
+      };
+    }
+
+    const currentClaim = existingClaims[foundIndex];
+    const check = validateClaimRecord(currentClaim);
+    if (!check.valid) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        reason: 'Claim ID ' + targetId + ' is malformed in state store.',
+        nextAction: 'Repair malformed claim record.'
+      };
+    }
+
+    if (currentClaim.sessionId === targetSessionId) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
+        persistenceConfirmed: true,
+        reason: 'Claim ' + targetId + ' is already associated with session ' + targetSessionId + '.',
+        nextAction: 'Session ID is already recorded.'
+      };
+    }
+
+    if (currentClaim.sessionId !== null && currentClaim.sessionId !== targetSessionId) {
+      return {
+        claim: currentClaim,
+        decisionCode: CLAIM_CODES.CLAIM_SESSION_CONFLICT,
+        persistenceConfirmed: true,
+        reason: 'Claim ' + targetId + ' is already associated with a different session ID (' + currentClaim.sessionId + '). Refusing to overwrite.',
+        nextAction: 'Investigate potential duplicate session creation for claim ' + targetId + '.'
+      };
+    }
+
+    const updatedClaim = {
+      ...currentClaim,
+      sessionId: targetSessionId,
+      updatedAt: currentDate.toISOString()
+    };
+
+    const updatedCheck = validateClaimRecord(updatedClaim);
+    if (!updatedCheck.valid) {
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+        persistenceConfirmed: false,
+        reason: 'Updated claim record with session ID failed schema validation.',
+        nextAction: 'Fix claim parameters.'
+      };
+    }
+
+    const updatedClaims = [...existingClaims];
+    updatedClaims[foundIndex] = updatedClaim;
+
+    const commitResult = await stateAdapter.commitStateChange(head, updatedClaims);
+
+    if (commitResult.success) {
+      return {
+        claim: updatedClaim,
+        decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
+        persistenceConfirmed: true,
+        reason: 'Successfully attached session ' + targetSessionId + ' to claim ' + targetId + '.',
+        nextAction: 'Proceed with session execution loop.'
+      };
+    }
+
+    if (commitResult.ambiguous || commitResult.reason === 'STORAGE_WRITE_ERROR') {
+      let freshSnapshot;
+      try {
+        freshSnapshot = await stateAdapter.readState();
+      } catch (err) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+          persistenceConfirmed: false,
+          reason: 'Session attachment write was ambiguous and read-back failed: ' + String(err?.message || err),
+          nextAction: 'Restore state access and verify session association for claim ' + targetId + '.'
+        };
+      }
+      const freshCheck = validateStateSnapshot(freshSnapshot);
+      if (!freshCheck.valid) {
+        return {
+          claim: null,
+          decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+          persistenceConfirmed: false,
+          reason: 'Session attachment read-back returned invalid state: ' + freshCheck.reason,
+          nextAction: 'Stop and repair the authoritative state store before retrying.'
+        };
+      }
+
+      const confirmed = freshSnapshot.claims.find((c) => c.claimId === targetId);
+      if (confirmed && confirmed.sessionId === targetSessionId) {
+        return {
+          claim: confirmed,
+          decisionCode: CLAIM_CODES.CLAIM_SESSION_ASSOCIATED,
+          persistenceConfirmed: true,
+          reason: 'Session ' + targetSessionId + ' attachment to claim ' + targetId + ' was confirmed in state store following write response.',
+          nextAction: 'Proceed with session execution loop.'
+        };
+      }
+
+      return {
+        claim: null,
+        decisionCode: CLAIM_CODES.CLAIM_PERSISTENCE_FAILED,
+        persistenceConfirmed: false,
+        reason: 'Session attachment write failed or was ambiguous and the session ID was not confirmed on read-back.',
+        nextAction: 'Inspect state store and retry session association if appropriate.'
+      };
+    }
+
+    // CAS conflict retry
+  }
+
+  return {
+    claim: null,
+    decisionCode: CLAIM_CODES.CAS_CONFLICT_EXHAUSTED,
+    persistenceConfirmed: false,
+    reason: 'Exhausted max CAS retries (' + maxRetries + ') during session ID attachment.',
+    nextAction: 'Retry session ID attachment after concurrent state updates settle.'
   };
 }
