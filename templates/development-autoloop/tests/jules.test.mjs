@@ -213,3 +213,78 @@ test('JulesClient propagates HTTP errors with sanitized messages', async () => {
     }
   );
 });
+
+
+test('JulesClient rejects malformed JSON and incomplete API collection payloads', async () => {
+  const malformedJsonClient = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async () => ({ ok: true, json: async () => { throw new SyntaxError('unexpected token'); } })
+  });
+  await assert.rejects(
+    () => malformedJsonClient.listSources(),
+    (err) => err.code === 'JULES_MALFORMED_RESPONSE'
+  );
+  const incompleteClient = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ nextPageToken: null }) })
+  });
+  await assert.rejects(() => incompleteClient.listSources(), /Incomplete API page/);
+});
+
+test('JulesClient fails closed when authoritative Source details disagree with list identity', async () => {
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async (url) => {
+      if (url.includes('/v1alpha/sources/github/acme/project')) {
+        return { ok: true, json: async () => ({
+          name: 'sources/github/acme/project',
+          githubRepo: { owner: 'other-owner', repo: 'project', branches: ['main'] }
+        }) };
+      }
+      return { ok: true, json: async () => ({
+        sources: [{ name: 'sources/github/acme/project', githubRepo: { owner: 'acme', repo: 'project' } }]
+      }) };
+    }
+  });
+  assert.equal(await client.findSourceForRepository('acme/project', 'main'), null);
+});
+
+test('JulesClient refuses to trust a list summary when full Source details are incomplete', async () => {
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async (url) => {
+      if (url.includes('/v1alpha/sources/github/acme/project')) {
+        return { ok: true, json: async () => ({ name: 'sources/github/acme/project' }) };
+      }
+      return { ok: true, json: async () => ({
+        sources: [{ name: 'sources/github/acme/project', githubRepo: { owner: 'acme', repo: 'project', branches: ['main'] } }]
+      }) };
+    }
+  });
+  assert.equal(await client.findSourceForRepository('acme/project', 'main'), null);
+});
+
+test('JulesClient classifies a real request deadline as a timeout', async () => {
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('mock fetch aborted by request deadline');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    })
+  });
+  await assert.rejects(
+    () => client._request('/v1alpha/sources', { method: 'GET', timeoutMs: 10 }),
+    (err) => err.code === 'JULES_NETWORK_ERROR' && err.isTimeout === true
+  );
+});
+
+test('JulesClient fails closed on an incomplete session record needed for reconciliation', async () => {
+  const client = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ sessions: [{ state: 'QUEUED' }] }) })
+  });
+  await assert.rejects(() => client.listSessions(), (err) => err.code === 'JULES_MALFORMED_RESPONSE');
+});
