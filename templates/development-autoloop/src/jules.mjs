@@ -208,26 +208,21 @@ export class JulesClient {
       const srcRepo = srcSummary?.githubRepo?.repo;
       if (typeof srcOwner === 'string' && typeof srcRepo === 'string') {
         if (srcOwner.trim().toLowerCase() === target.owner && srcRepo.trim().toLowerCase() === target.repo) {
-          let fullSource = srcSummary;
-          let branches = Array.isArray(srcSummary?.githubRepo?.branches)
-            ? srcSummary.githubRepo.branches
-            : (Array.isArray(srcSummary?.branches) ? srcSummary.branches : null);
+          if (!srcSummary.name) return null;
 
-          // If branch info is missing from summary list item and startingBranch is requested, fetch full source details
-          if (startingBranch && (!branches || branches.length === 0) && srcSummary.name) {
-            try {
-              fullSource = await this.getSource(srcSummary.name);
-              branches = Array.isArray(fullSource?.githubRepo?.branches)
-                ? fullSource.githubRepo.branches
-                : (Array.isArray(fullSource?.branches) ? fullSource.branches : null);
-            } catch {
-              // If fetching full source details fails, fail closed for branch verification
-              return null;
-            }
+          let fullSource;
+          try {
+            fullSource = await this.getSource(srcSummary.name);
+          } catch {
+            return null;
           }
 
           if (startingBranch) {
             const targetBranch = startingBranch.trim();
+            const branches = Array.isArray(fullSource?.githubRepo?.branches)
+              ? fullSource.githubRepo.branches
+              : (Array.isArray(fullSource?.branches) ? fullSource.branches : null);
+
             if (!branches || branches.length === 0) {
               return null;
             }

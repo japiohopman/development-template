@@ -262,14 +262,22 @@ export async function dispatchTask({
 
   // Step 6: Handle successful session creation vs timeouts / ambiguities
   if (createdSession && createdSession.id) {
-    const observedAt = currentDate.toISOString();
-    const sessionWithObserved = { ...createdSession, observedAt };
+    const sessionObservedAt = new Date().toISOString();
+    const sessionWithObserved = { ...createdSession, observedAt: sessionObservedAt };
 
-    // Attach session ID to claim even if state is UNKNOWN so provider work is tracked
+    const sessionMetadata = {
+      providerSessionId: createdSession.id,
+      rawProviderState: createdSession.state ?? null,
+      normalizedProviderStatus: createdSession.normalizedState,
+      lastObservedAt: sessionObservedAt
+    };
+
+    // Attach session ID and lifecycle metadata to claim
     const attachRes = await attachSessionToClaim({
       stateAdapter,
       claimId: activeClaim.claimId,
       sessionId: createdSession.id,
+      metadata: sessionMetadata,
       now: currentDate
     });
 
@@ -291,7 +299,7 @@ export async function dispatchTask({
         decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
         reason: `Session created (${createdSession.id}) but persisting session ID to claim failed: ${attachRes.reason}`,
         session: sessionWithObserved,
-        claim: activeClaim
+        claim: finalClaim
       };
     }
 
@@ -346,15 +354,24 @@ export async function dispatchTask({
   }
 
   if (verifiedMatchingSessions.length === 1) {
+    const reconObservedAt = new Date().toISOString();
     const reconciledSession = {
       ...verifiedMatchingSessions[0],
-      observedAt: currentDate.toISOString()
+      observedAt: reconObservedAt
+    };
+
+    const sessionMetadata = {
+      providerSessionId: reconciledSession.id,
+      rawProviderState: reconciledSession.state ?? null,
+      normalizedProviderStatus: reconciledSession.normalizedState,
+      lastObservedAt: reconObservedAt
     };
 
     const attachRes = await attachSessionToClaim({
       stateAdapter,
       claimId: activeClaim.claimId,
       sessionId: reconciledSession.id,
+      metadata: sessionMetadata,
       now: currentDate
     });
 
@@ -376,7 +393,7 @@ export async function dispatchTask({
         decisionCode: DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED,
         reason: `Reconciled single matching session (${reconciledSession.id}) after create timeout, but attaching session ID failed: ${attachRes.reason}`,
         session: reconciledSession,
-        claim: activeClaim
+        claim: finalClaim
       };
     }
 

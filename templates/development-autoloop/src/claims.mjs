@@ -1347,6 +1347,7 @@ export async function attachSessionToClaim({
   stateAdapter,
   claimId,
   sessionId,
+  metadata = null,
   maxRetries = 3,
   now = new Date()
 }) {
@@ -1485,10 +1486,15 @@ export async function attachSessionToClaim({
       };
     }
 
+    const mergedMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? { ...(currentClaim.metadata || {}), ...metadata }
+      : (currentClaim.metadata || {});
+
     const updatedClaim = {
       ...currentClaim,
       sessionId: targetSessionId,
-      updatedAt: currentDate.toISOString()
+      updatedAt: currentDate.toISOString(),
+      metadata: mergedMetadata
     };
 
     const updatedCheck = validateClaimRecord(updatedClaim);

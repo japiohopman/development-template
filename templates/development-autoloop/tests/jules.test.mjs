@@ -31,6 +31,28 @@ test('sanitizeJulesErrorMessage redacts sensitive API key', () => {
 
 test('JulesClient listSources handles pagination and verifies branch if specified', async () => {
   const mockFetch = async (url) => {
+    if (url.includes('/v1alpha/sources/github/acme/autoloop')) {
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'sources/github/acme/autoloop',
+          githubRepo: {
+            owner: 'acme',
+            repo: 'autoloop',
+            branches: [{ displayName: 'main' }, { displayName: 'feature' }]
+          }
+        })
+      };
+    }
+    if (url.includes('/v1alpha/sources/github/other/repo')) {
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'sources/github/other/repo',
+          githubRepo: { owner: 'other', repo: 'repo', branches: ['main'] }
+        })
+      };
+    }
     if (url.includes('pageToken=page2')) {
       return {
         ok: true,
