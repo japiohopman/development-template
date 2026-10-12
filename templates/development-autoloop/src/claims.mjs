@@ -630,6 +630,16 @@ export async function acquireClaim({
   }
   const ttlMs = Math.max(1, requestedTtlMinutes) * 60 * 1000;
   const expiresAtDate = new Date(currentDate.getTime() + ttlMs);
+  if (!Number.isFinite(expiresAtDate.getTime())) {
+    return {
+      claim: null,
+      decisionCode: CLAIM_CODES.CLAIM_INVALID_STATE,
+      persistenceConfirmed: false,
+      safeToDispatch: false,
+      reason: 'ttlMinutes produces a lease expiry outside the supported timestamp range.',
+      nextAction: 'Use a smaller, finite positive lease duration.'
+    };
+  }
 
   const targetClaimId = typeof claimId === 'string' && claimId.trim()
     ? claimId.trim()
