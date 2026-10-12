@@ -767,3 +767,77 @@ test('ambiguous recovery write is confirmed only when exact reconciliation evide
   assert.equal(result.persistenceConfirmed, true);
   assert.deepEqual(result.claim.metadata.reconciliationEvidence, evidence);
 });
+
+
+test('GitHubStateBranchAdapter reports a non-fast-forward ref update as a CAS conflict', async () => {
+  const requests = [];
+  const octokit = {
+    async request(route, args) {
+      requests.push({ route, args });
+      switch (route) {
+        case 'GET /repos/{owner}/{repo}/git/ref/{ref}':
+          return { data: { object: { sha: 'expected-head-commit' } } };
+        case 'GET /repos/{owner}/{repo}/git/commits/{commit_sha}':
+          return { data: { tree: { sha: 'expected-tree-object' } } };
+        case 'POST /repos/{owner}/{repo}/git/blobs':
+          return { data: { sha: 'new-blob-sha' } };
+        case 'POST /repos/{owner}/{repo}/git/trees':
+          return { data: { sha: 'new-tree-sha' } };
+        case 'POST /repos/{owner}/{repo}/git/commits':
+          return { data: { sha: 'competing-commit-sha' } };
+        case 'PATCH /repos/{owner}/{repo}/git/refs/{ref}': {
+          const error = new Error('Update is not a fast-forward because another writer won.');
+          error.status = 422;
+          throw error;
+        }
+        default:
+          throw new Error('Unexpected mocked GitHub route: ' + route);
+      }
+    }
+  };
+  const adapter = new GitHubStateBranchAdapter({
+    octokit,
+    repository: 'acme/autoloop',
+    stateBranch: 'autoloop-state',
+    defaultBranch: 'main'
+  });
+  const result = await adapter.commitStateChange('expected-head-commit', [validSampleClaim()]);
+  assert.equal(result.success, false);
+  assert.equal(result.reason, 'CAS_CONFLICT');
+  assert.equal(result.ambiguous, false);
+  const refUpdate = requests.find((request) => request.route === 'PATCH /repos/{owner}/{repo}/git/refs/{ref}');
+  assert.equal(refUpdate.args.force, false);
+});
+
+test('ambiguous write cannot confirm an unrelated record that reuses the requested claimId', async () => {
+  let storedClaims = [];
+  let readCount = 0;
+  const impostorClaim = validSampleClaim({
+    claimId: 'caller-chosen-id',
+    issueNumber: 888,
+    owner: 'different-run',
+    provider: 'different-provider'
+  });
+  const stateAdapter = {
+    async readState() {
+      readCount += 1;
+      return { head: readCount === 1 ? 'v0' : 'v1', claims: structuredClone(storedClaims) };
+    },
+    async commitStateChange() {
+      storedClaims = [impostorClaim];
+      return { success: false, head: null, reason: 'AMBIGUOUS_WRITE_TIMEOUT', ambiguous: true };
+    }
+  };
+  const result = await acquireClaim({
+    stateAdapter,
+    repository: 'acme/autoloop',
+    issueNumber: 887,
+    owner: 'intended-run',
+    provider: 'jules',
+    claimId: 'caller-chosen-id'
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_PERSISTENCE_FAILED);
+  assert.equal(result.persistenceConfirmed, false);
+  assert.equal(result.safeToDispatch, false);
+  assert.equal(result.claim, null);
+});
