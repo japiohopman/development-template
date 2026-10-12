@@ -10,11 +10,23 @@ Emit the decision code, timestamp, Issue/PR/session/claim identifiers, failed ch
 - **Open PR with missing session:** keep the work blocked while the PR is open. Recover the existing session reference or let a human explicitly resolve the PR.
 - **Closed but unmerged PR:** require human classification. Do not treat closure alone as successful completion.
 - **Merged PR and stale provider session:** verify the repository and merge state, then reconcile the historical session record.
-- **Expired claim:** expiry alone is insufficient. Reconcile provider sessions and PRs, then reclaim only through an atomic compare-and-swap write.
+- **Expired claim:** lease expiry alone MUST NEVER release or authorize reuse of a claim. Safe recovery requires explicit, verified reconciliation evidence across three domains:
+  1. **Provider sessions:** confirmed terminal (`COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`) or verified non-existent (`none`).
+  2. **Git branches:** confirmed clean, deleted, merged, or verified non-existent (`none`).
+  3. **Pull requests:** confirmed merged, closed with explicit human classification, or verified non-existent (`none`).
+  Missing, partial, failed, or unknown evidence blocks recovery (`CLAIM_RECOVERY_BLOCKED`).
+
+- **Evidence scope and freshness:** the evidence record must name the exact `claimId`, repository, Issue number, `verifiedBy`, and ISO `verifiedAt`. Each of `sessions`, `branches`, and `pullRequests` must independently include `verified: true`, the same repository and Issue number, a source identifier, an ISO `observedAt`, and a permitted status. A non-`none` session result must identify the exact inspected session; if the claim already has a `sessionId`, the evidence must match it.
+- **Time bounds:** each domain's `observedAt` must not be later than `verifiedAt` and must not predate the claim. Recovery rejects evidence that is future-dated or more than five minutes old at the moment of recovery.
+- **Verification responsibility:** this claim layer validates the evidence's schema, scope, timestamps, freshness, and audit persistence. It does not itself contact Jules or query GitHub to prove the evidence is true. The future reconciliation/controller layer must only produce this record after the corresponding read-only checks have actually succeeded.
 - **Ambiguous provider creation timeout:** search/reconcile by claim ID and provider metadata before retrying. If it cannot be resolved, stop and escalate.
-- **Failed state write:** dispatch must not be reported as successful. Recover state storage and reconcile before authorizing further work.
+- **Failed or ambiguous state write:** state updates perform exact `claimId` read-back confirmation. If write response is ambiguous and read-back does not confirm the claim, report `CLAIM_PERSISTENCE_FAILED` and do not report success.
 - **Review event for an old PR head:** mark it stale and require review of the current head SHA.
 - **Unsatisfied or ambiguous dependency state (`BLOCK_DEPENDENCY_*`):** verify dependency completion state (`completed` state_reason required) or resolve missing/unplanned dependencies before candidate re-selection.
 - **Missing human readiness evidence (`BLOCK_HUMAN_READINESS_REQUIRED`):** verify the governing Issue has explicit human readiness evidence or label before dispatch.
 
-Manual cleanup must require explicit entity IDs and an exact typed confirmation. Never bulk-delete or silently abandon provider sessions. No cleanup command should be enabled until its dry-run output and tests exist.
+## Exact-ID Inspect and Recovery Contract
+Manual or automated claim management must target exact claim IDs (`claimId`):
+- `inspectClaim({ stateAdapter, claimId })`: inspect authoritative state for exact claim record and active lock status.
+- `reconcileAndRecoverClaim({ stateAdapter, claimId, evidence, targetStatus })`: perform atomic compare-and-swap state transition to `RECLAIMED` or `RELEASED` only when complete verified evidence is provided.
+- **No bulk deletion or silent abandonment:** claims must be preserved with full historical reconciliation audit records. Never execute bulk deletion commands on state stores.
