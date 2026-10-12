@@ -269,10 +269,7 @@ export async function dispatchTask({
       providerSessionId: createdSession.id,
       rawProviderState: createdSession.state ?? null,
       normalizedProviderStatus: createdSession.normalizedState,
-      lastObservedAt: sessionObservedAt,
-      providerLifecycleReason: createdSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN
-        ? 'Blocked: Jules returned an unknown session state. Inspect the exact session and confirm its status before resuming; do not create a replacement session.'
-        : 'Session creation response received. Continue only through the configured plan-approval and session monitoring workflow.'
+      lastObservedAt: sessionObservedAt
     };
 
     // Attach session ID and lifecycle metadata to claim
@@ -281,7 +278,7 @@ export async function dispatchTask({
       claimId: activeClaim.claimId,
       sessionId: createdSession.id,
       metadata: sessionMetadata,
-      now: new Date(sessionObservedAt)
+      now: currentDate
     });
 
     const finalClaim = attachRes.claim || activeClaim;
@@ -367,10 +364,7 @@ export async function dispatchTask({
       providerSessionId: reconciledSession.id,
       rawProviderState: reconciledSession.state ?? null,
       normalizedProviderStatus: reconciledSession.normalizedState,
-      lastObservedAt: reconObservedAt,
-      providerLifecycleReason: reconciledSession.normalizedState === JULES_STATE_NORMALIZED.UNKNOWN
-        ? 'Blocked: reconciled Jules session has an unknown state. Inspect this exact session before proceeding; do not create another session.'
-        : 'Creation response was ambiguous; this exact existing session was verified by read-only reconciliation. Do not retry session creation.'
+      lastObservedAt: reconObservedAt
     };
 
     const attachRes = await attachSessionToClaim({
@@ -378,7 +372,7 @@ export async function dispatchTask({
       claimId: activeClaim.claimId,
       sessionId: reconciledSession.id,
       metadata: sessionMetadata,
-      now: new Date(reconObservedAt)
+      now: currentDate
     });
 
     const finalClaim = attachRes.claim || activeClaim;
