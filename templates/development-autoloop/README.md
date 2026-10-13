@@ -1,55 +1,94 @@
 # Development Autoloop
 
-A project-neutral foundation for safe, issue-first development automation.
+A reusable set of building blocks for a careful Issue → coding agent → pull request → review workflow.
 
-**Status: Foundation — not enabled for live dispatch.**
+**Status: Foundation — not ready to run tasks automatically.**
 
-This template contains a pure preflight decision layer, pagination helpers, schema-backed configuration validation, contract validators, deterministic Issue selection and dependency checks, tests, and operating contracts. It does not create external provider sessions, claim issues, mutate labels, merge pull requests, or auto-promote issues.
+In plain language: some important parts have been built and tested, including the Jules adapter. But those parts are not yet connected to a working GitHub Actions workflow that chooses an Issue, gathers the latest GitHub information, and starts Jules. There is **no working dispatch button in Actions yet**.
 
-## Start here
+## What you will see in GitHub Actions
 
-1. Copy `config/autoloop.example.json` to `config/autoloop.json` in a consuming repository and adapt only repository-specific settings.
-2. Read `docs/ARCHITECTURE.md` and `docs/IMPLEMENTATION_PLAN.md`.
-3. Use Node.js 20 or newer and run `npm test` and `npm run check` from this template directory.
-4. The configuration contract is defined in `config/autoloop.schema.v1.json`. `src/config.mjs` validates against that versioned schema and returns stable `{ path, code, message }` diagnostics. The local evaluator supports the schema keyword subset explicitly used by the schema and fails closed if an unsupported keyword is introduced.
-5. Deterministic Issue selection and dependency checks are in `src/selection.mjs`. Candidate selection validates readiness labels, issue contracts, `humanReadinessRequired` gates, dependency states (requiring explicit completion reasons), active PRs/claims/sessions, and sequence ordering. Selection is pure and dry-run only.
-6. Complete the implementation plan in order before enabling live automation.
+In the main `development-template` repository, the active workflow is called **Template validation**. It is a checker, not a worker.
 
-## Consuming-repository Environment and secrets setup
+Imagine we are building a robot:
+- The checker looks at the robot's parts and tests whether they behave as expected.
+- A dispatcher is the button and wiring that tells the robot which job to do.
+- We have the checker and several robot parts. The dispatcher and the full work-and-review loop still need to be connected.
 
-**Current state: none required yet.** This foundation has no live-dispatch workflow and no workflow references a GitHub Environment. Do not configure a provider secret just to use the current validation-only stage.
+### What does Template validation check?
 
-| Name | Current requirement | How it is supplied |
+The workflow lives at the repository root in [`.github/workflows/template-ci.yml`](../../../.github/workflows/template-ci.yml). When relevant code or documentation changes, GitHub runs these steps:
+
+1. **Set up:** GitHub downloads the version of the code it is checking and starts Node.js 20.
+2. **Syntax checks (`npm run check`):** Node.js checks that the listed code files are written in a form it can read. This catches certain typing and syntax mistakes. It does not prove the whole system works.
+3. **Unit tests (`npm test`):** small automatic tests try lots of situations and check the answers. For example, they test whether unclear or unsafe situations are blocked.
+4. **Report:** GitHub marks the run green if both steps pass, or red if a step fails.
+
+Some tests pretend to be the Jules service by returning made-up test responses. These are called **mocks**. This lets us test timeouts, errors, and successful replies without using a real API key or creating a real Jules session.
+
+A green check means only this: **the syntax checks and automated tests passed on the exact commit being checked.** It does not mean that Jules was given work, a PR was reviewed, or the entire loop was tested from start to finish.
+
+The file `.github/workflows/ci.yml` inside this template folder is an example workflow that travels with the template. GitHub does not run that nested file as a workflow in this catalog repository; the active checker is the root workflow linked above.
+
+## What has been built so far?
+
+| Part | In everyday words | Current state |
 | --- | --- | --- |
-| GitHub Actions `GITHUB_TOKEN` | No manual secret setup for the current stage. Future GitHub API workflows may use it when their permissions are explicitly configured. | GitHub Actions supplies the token automatically to a running workflow. Its permission scope must still be defined with least privilege. |
-| `JULES_API_KEY` | **Future only; not required now.** Add it only when the Jules adapter is implemented and its workflow contract names the Environment and secret. | A repository administrator must add it manually as an Environment secret in the consuming repository. Never put the value in a file or comment. |
+| Configuration checks | Make sure the settings follow the agreed rules. | Built and tested |
+| Issue and PR contracts | Check that an Issue or PR contains the information we require. | Built and tested |
+| Issue selection | Choose one safe next Issue from a complete set of GitHub information. If the choice is unclear, stop instead of guessing. | Built and tested; decision logic only |
+| Durable claim | Put a reservation on the Issue so a second run does not start the same work at the same time. | Built and tested |
+| Jules adapter and dispatch code | The code knows how to validate a task, find the right Jules source, request a session, and handle uncertain responses carefully. | Code exists; no Actions runner calls it yet |
+| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Next milestone |
+| PR contract gate | Check that a PR has the required information and evidence for its exact latest commit. | Not built yet |
+| Review relay | Turn a trusted review into a safe next step, and send requested fixes back to the existing work instead of starting duplicates. | Not built yet |
+| Full loop and pilot | Test the whole process in a separate, disposable repository before relying on it. | Not built yet |
 
-When a later adapter introduces a named Environment, follow the exact Environment name documented by that adapter's workflow. In the consuming repository, go to **Settings → Environments**, create or select that Environment, then add only the listed secret names under its Environment secrets. Do not guess an Environment name before the corresponding workflow uses it.
+Follow the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the order of work. The key remaining milestones are [Issue #6: reconcile sessions and PRs](https://github.com/japiohopman/development-template/issues/6), [Issue #7: PR contract gate](https://github.com/japiohopman/development-template/issues/7), [Issue #8: review relay](https://github.com/japiohopman/development-template/issues/8), and [Issue #9: end-to-end tests and pilot](https://github.com/japiohopman/development-template/issues/9).
 
-Environment definitions and Environment secrets do **not** carry over when a repository is created from this template. Configure them separately in every consuming repository that actually needs them. Never commit credential values to configuration, source, test fixtures, documentation, or logs.
+## A few words explained
 
-## Core safety rules
+- **Preflight / safety check:** look around before doing anything, like checking that the road is clear before crossing.
+- **Snapshot:** one collected picture of the current Issues, claims, sessions, branches, and PRs.
+- **Claim:** a reservation that says, “this run owns this Issue for now.”
+- **Dispatch:** actually send an eligible Issue to Jules as a coding task.
+- **Reconciliation:** compare records with what really exists and fix or block disagreements.
+- **Fail closed:** when information is missing or confusing, stop safely instead of guessing.
+- **PR / pull request:** a proposal to add code changes to the main code. It is reviewed before being merged.
 
-- A GitHub Issue is the authoritative execution contract. A roadmap can order work but cannot override issue scope or acceptance criteria.
-- Live dispatch must require exact manual authorization during commissioning.
-- One active execution per repository is the safe default.
-- Paused, waiting-for-feedback, and approval-waiting sessions block another dispatch.
-- Unknown provider states and incomplete API snapshots fail closed.
-- An associated merged PR may be treated as durable completion only after the PR has been verified.
-- An open or closed-but-unmerged PR remains unresolved.
-- A review approval applies to the exact PR head SHA; a new commit invalidates it.
-- Discovery may propose work but cannot dispatch its own suggestions.
-- Humans retain merge authority by default. Automatic merge is disabled.
-- Do not persist transient queue state by committing generated state files to the protected default branch.
+## How to run the tests yourself
 
-## Current boundaries and gaps
+You need Node.js 20 or newer.
 
-The code here is intentionally provider-neutral. A production implementation still needs:
-- a provider adapter and source/repository identity verification;
-- durable claims with compare-and-swap semantics and stale-claim recovery;
-- session creation with an explicit dispatch confirmation;
-- reconciliation across provider sessions, issues, branches, and PRs;
-- a trusted-reviewer state machine tied to the current PR head;
-- API-mocked integration tests and a disposable-repository pilot.
+1. Open a terminal in this folder: `templates/development-autoloop/`.
+2. Run `npm run check` to check the source files' syntax.
+3. Run `npm test` to run the automatic tests.
 
-No workflow in this template should create live external work until those gaps are implemented and the documented gates pass.
+These commands do not dispatch work to Jules.
+
+## Environment and secrets
+
+**You do not need to add a Jules API key for the current validation workflow.**
+
+The code contains a Jules adapter, but no active GitHub Actions workflow calls the dispatch function yet. Do not add `JULES_API_KEY` just because you see it mentioned in the code or the roadmap. When the actual dispatch workflow is ready, its documentation must name the exact secret and, if used, the GitHub Environment where it belongs.
+
+GitHub provides `GITHUB_TOKEN` to Actions automatically. Its permissions still need to be kept as small as possible. Secrets must never be committed to configuration files, source code, test fixtures, Issues, PR comments, or logs.
+
+Secrets and Environment settings do not copy over automatically when a repository is created from a template. They must be configured separately in a project that actually needs them.
+
+## Safety rules
+
+- Keep dispatch disabled by default until the complete workflow has passed the planned checks.
+- Require exact authorization at the dispatch boundary.
+- Never start another task when the old session or PR may still be active.
+- Do not assume a failed or timed-out request means that Jules did not receive it. Check first; do not blindly retry session creation.
+- Missing data, unknown states, or failed API calls must block work rather than look like an empty work queue.
+- A green test run does not approve a PR.
+- A review approval applies only to the exact PR commit that was reviewed; a new commit needs a new review.
+- Human approval remains required for merging by default.
+
+## Recovery and next steps
+
+Read [Architecture](docs/ARCHITECTURE.md), [Implementation plan](docs/IMPLEMENTATION_PLAN.md), and [Recovery and operations](docs/RECOVERY.md) for the detailed rules.
+
+The goal is to make normal work require very little attention from you. If the system reaches a genuine problem, it must explain what happened, what it changed (if anything), and the next safe action. It must not hide the problem in an endless retry loop.
