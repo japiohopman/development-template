@@ -105,10 +105,17 @@ export async function dispatchTask({
 
   const configCheck = validateConfig(config);
   if (!configCheck.valid) {
+    const confirmationConfigInvalid = configCheck.errors.some(
+      (diagnostic) => diagnostic.path === '/requiredConfirmation'
+    );
     return {
       success: false,
-      decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
-      reason: 'Configuration failed schema validation.',
+      decisionCode: confirmationConfigInvalid
+        ? DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID
+        : DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+      reason: confirmationConfigInvalid
+        ? 'Required dispatch confirmation is missing or invalid in configuration.'
+        : 'Configuration failed schema validation.',
       blockers: configCheck.errors,
       session: null,
       claim: null
