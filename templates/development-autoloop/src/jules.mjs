@@ -120,8 +120,8 @@ export class JulesClient {
     } catch (err) {
       const safeMsg = sanitizeJulesErrorMessage(err, this.apiKey);
       const networkError = new Error('Jules API network error: ' + safeMsg);
-      networkError.code = 'JULES_NETWORK_ERROR';
       networkError.isTimeout = err?.name === 'AbortError' || err?.name === 'TimeoutError' || err?.code === 'UND_ERR_CONNECT_TIMEOUT';
+      networkError.code = networkError.isTimeout ? 'JULES_REQUEST_TIMEOUT' : 'JULES_NETWORK_ERROR';
       throw networkError;
     } finally {
       clearTimeout(timeoutId);
@@ -344,7 +344,8 @@ export class JulesClient {
       }
       const id = typeof s.id === 'string' && s.id.trim() ? s.id.trim()
         : (typeof s.name === 'string' && s.name.includes('/') ? s.name.split('/').pop().trim() : null);
-      if (!id || (typeof s.prompt !== 'string' && typeof s.title !== 'string')) {
+      if (!id || typeof s.state !== 'string' || !s.state.trim()
+        || (typeof s.prompt !== 'string' && typeof s.title !== 'string')) {
         const err = new Error('Jules session list contains an incomplete session record.');
         err.code = 'JULES_MALFORMED_RESPONSE';
         throw err;

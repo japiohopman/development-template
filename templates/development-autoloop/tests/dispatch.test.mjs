@@ -529,6 +529,67 @@ test('dispatchTask blocks session with UNKNOWN normalized state', async () => {
   assert.match(persistedClaim.metadata.providerLifecycleReason, /do not create a replacement session/);
 });
 
+test('dispatchTask blocks if full session details do not confirm the exact claim marker', async () => {
+  const config = sampleConfig();
+  const claimId = 'claim-230-marker-mismatch';
+  const packet = samplePacket({ issueNumber: 230, claimId });
+  const stateAdapter = new InMemoryStateAdapter();
+  let createPostCount = 0;
+
+  const mockFetch = createDefaultMockFetch({
+    customRoute: async (url, options) => {
+      if (url.includes('/v1alpha/sessions/sess-summary-mismatch') && options.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            id: 'sess-summary-mismatch',
+            name: 'sessions/sess-summary-mismatch',
+            prompt: 'A different task without the claim marker',
+            state: 'QUEUED',
+            sourceContext: {
+              source: 'sources/github/acme/autoloop',
+              githubRepoContext: { owner: 'acme', repo: 'autoloop', startingBranch: 'main' }
+            }
+          })
+        };
+      }
+      if (url.includes('/v1alpha/sessions') && options.method === 'POST') {
+        createPostCount++;
+        const error = new Error('Connection timeout after request transmission');
+        error.name = 'TimeoutError';
+        throw error;
+      }
+      if (url.includes('/v1alpha/sessions') && options.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            sessions: [{
+              id: 'sess-summary-mismatch',
+              prompt: `Task [claimId: ${claimId}]`,
+              state: 'QUEUED'
+            }]
+          })
+        };
+      }
+    }
+  });
+
+  const providerClient = new JulesClient({ apiKey: 'my-key', fetchImpl: mockFetch });
+  const result = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    snapshot: sampleSnapshot(230),
+    providerClient
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.decisionCode, DISPATCH_CODES.DISPATCH_AMBIGUOUS_BLOCKED);
+  assert.equal(createPostCount, 1);
+  assert.equal(result.claim.sessionId, null);
+});
+
 test('dispatchTask handles timeout during session creation and blocks when 0 matches found', async () => {
   const config = sampleConfig();
   const packet = samplePacket({ issueNumber: 300, claimId: 'claim-300-timeout' });

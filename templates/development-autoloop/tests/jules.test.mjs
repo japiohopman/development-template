@@ -277,7 +277,7 @@ test('JulesClient classifies a real request deadline as a timeout', async () => 
   });
   await assert.rejects(
     () => client._request('/v1alpha/sources', { method: 'GET', timeoutMs: 10 }),
-    (err) => err.code === 'JULES_NETWORK_ERROR' && err.isTimeout === true
+    (err) => err.code === 'JULES_REQUEST_TIMEOUT' && err.isTimeout === true
   );
 });
 
@@ -287,6 +287,12 @@ test('JulesClient fails closed on an incomplete session record needed for reconc
     fetchImpl: async () => ({ ok: true, json: async () => ({ sessions: [{ state: 'QUEUED' }] }) })
   });
   await assert.rejects(() => client.listSessions(), (err) => err.code === 'JULES_MALFORMED_RESPONSE');
+
+  const missingStateClient = new JulesClient({
+    apiKey: 'test-key',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ sessions: [{ id: 'session-no-state', prompt: 'Task' }] }) })
+  });
+  await assert.rejects(() => missingStateClient.listSessions(), (err) => err.code === 'JULES_MALFORMED_RESPONSE');
 });
 
 test('JulesClient refuses a partial inventory if a later source page fails', async () => {

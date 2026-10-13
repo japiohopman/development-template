@@ -347,6 +347,10 @@ export async function dispatchTask({
       continue;
     }
 
+    const fullPromptMatch = typeof fullSession.prompt === 'string' && fullSession.prompt.includes(exactMarker);
+    const fullTitleMatch = typeof fullSession.title === 'string' && fullSession.title.includes(exactMarker);
+    if (!fullPromptMatch && !fullTitleMatch) continue;
+
     const sSource = fullSession.sourceContext?.source;
     if (!sSource || sSource !== source.name) continue;
 
