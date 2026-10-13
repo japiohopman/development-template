@@ -67,7 +67,7 @@ function samplePacket(overrides = {}) {
     repository: 'acme/autoloop',
     issueNumber,
     issueTitle: 'Fix issue ' + issueNumber,
-    issueBody: '## Scope\\nFix issue.',
+    issueBody: '## Scope\nFix issue.',
     startingBranch: 'main',
     prompt: 'Fix the bug in auth',
     claimId: 'claim-' + issueNumber + '-test',
@@ -267,7 +267,7 @@ test('dispatchTask blocks snapshots from missing or mismatched repositories befo
 test('dispatchTask blocks Issue title or body drift against authoritative snapshot', async () => {
   for (const packet of [
     samplePacket({ issueTitle: 'Different issue title' }),
-    samplePacket({ issueBody: '## Scope\\nDifferent issue body' })
+    samplePacket({ issueBody: '## Scope\nDifferent issue body' })
   ]) {
     const stateAdapter = new InMemoryStateAdapter();
     let providerRequests = 0;
@@ -283,7 +283,7 @@ test('dispatchTask blocks Issue title or body drift against authoritative snapsh
 
     assert.equal(res.success, false);
     assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_INVALID_PACKET);
-    assert.match(res.reason, /title\\/body do not exactly match/i);
+    assert.match(res.reason, /title\/body do not exactly match/i);
     assert.equal(providerRequests, 0);
     assert.equal((await stateAdapter.readState()).claims.length, 0);
   }
