@@ -13,7 +13,8 @@ import {
   acquireClaim,
   inspectClaim,
   validateReconciliationEvidence,
-  reconcileAndRecoverClaim
+  reconcileAndRecoverClaim,
+  attachSessionToClaim
 } from '../src/claims.mjs';
 
 function validSampleClaim(overrides = {}) {
@@ -949,6 +950,105 @@ test('recovery rejects an invalid clock value without changing the claim', async
   assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
 });
 
+test('attachSessionToClaim attaches session ID to existing active claim', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-1', sessionId: null });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-1',
+    sessionId: 'session-xyz-123',
+    now: new Date('2026-03-31T10:05:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-xyz-123');
+
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].sessionId, 'session-xyz-123');
+});
+
+test('attachSessionToClaim is idempotent when same session ID is provided', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-2', sessionId: 'session-xyz-123' });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-2',
+    sessionId: 'session-xyz-123',
+    now: new Date('2026-03-31T10:15:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-xyz-123');
+});
+
+test('attachSessionToClaim rejects overwriting with a different session ID', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-attach-3', sessionId: 'session-existing' });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-attach-3',
+    sessionId: 'session-new-different',
+    now: new Date('2026-03-31T10:15:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_CONFLICT);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'session-existing');
+
+  const snapshot = await stateAdapter.readState();
+  assert.equal(snapshot.claims[0].sessionId, 'session-existing');
+});
+
+test('attachSessionToClaim rejects expired or non-active claims', async () => {
+  const expiredClaim = validSampleClaim({
+    claimId: 'claim-expired-attach',
+    sessionId: null,
+    createdAt: '2026-03-31T08:00:00.000Z',
+    expiresAt: '2026-03-31T08:45:00.000Z'
+  });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [expiredClaim], head: 'v1' });
+
+  const res = await attachSessionToClaim({
+    stateAdapter,
+    claimId: 'claim-expired-attach',
+    sessionId: 'session-late',
+    now: new Date('2026-03-31T10:00:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(res.persistenceConfirmed, false);
+});
+
+test('attachSessionToClaim handles commit rejection gracefully via read-back reconciliation', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-reject-commit', sessionId: null });
+  let commitAttempted = false;
+  const rejectingAdapter = {
+    async readState() {
+      return { head: 'v1', claims: [commitAttempted ? { ...claim, sessionId: 'sess-reject' } : claim] };
+    },
+    async commitStateChange() {
+      commitAttempted = true;
+      throw new Error('Database connection dropped during commit');
+    }
+  };
+
+  const res = await attachSessionToClaim({
+    stateAdapter: rejectingAdapter,
+    claimId: 'claim-reject-commit',
+    sessionId: 'sess-reject',
+    now: new Date('2026-03-31T10:15:00.000Z')
+  });
+
+  assert.equal(res.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(res.persistenceConfirmed, true);
+  assert.equal(res.claim.sessionId, 'sess-reject');
+});
+
 
 test('recovery rejects evidence scoped to a different claim, repository, or Issue', async () => {
   const staleClaim = validSampleClaim({
@@ -1018,4 +1118,59 @@ test('recovery rejects evidence that is older than five minutes or timestamped i
   const snapshot = await stateAdapter.readState();
   assert.equal(snapshot.claims[0].status, CLAIM_STATUS.EXPIRED);
   assert.equal(snapshot.claims[0].reconciliationStatus, RECONCILIATION_STATUS.PENDING);
+});
+
+
+test('attachSessionToClaim validates and durably reads back complete provider lifecycle metadata', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-lifecycle-meta', sessionId: null });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+  const metadata = {
+    providerSessionId: 'session-unknown-1',
+    rawProviderState: 'FUTURE_PROVIDER_STATE',
+    normalizedProviderStatus: 'UNKNOWN',
+    lastObservedAt: '2026-03-31T10:05:00.000Z',
+    providerLifecycleReason: 'Blocked: inspect this exact session and confirm its state before continuing; do not create a replacement.'
+  };
+  const result = await attachSessionToClaim({
+    stateAdapter, claimId: claim.claimId, sessionId: metadata.providerSessionId,
+    metadata, now: new Date(metadata.lastObservedAt)
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(result.persistenceConfirmed, true);
+  const persisted = (await stateAdapter.readState()).claims[0];
+  assert.equal(persisted.sessionId, metadata.providerSessionId);
+  for (const [key, value] of Object.entries(metadata)) assert.equal(persisted.metadata[key], value);
+});
+
+test('attachSessionToClaim rejects incomplete lifecycle metadata before writing', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-lifecycle-invalid', sessionId: null });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+  const result = await attachSessionToClaim({
+    stateAdapter, claimId: claim.claimId, sessionId: 'session-invalid-meta',
+    metadata: { providerSessionId: 'session-invalid-meta', rawProviderState: 'QUEUED',
+      normalizedProviderStatus: 'QUEUED', lastObservedAt: 'not-a-time' },
+    now: new Date('2026-03-31T10:05:00.000Z')
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_INVALID_STATE);
+  assert.equal(result.persistenceConfirmed, false);
+  assert.equal((await stateAdapter.readState()).claims[0].sessionId, null);
+});
+
+test('attachSessionToClaim merges lifecycle metadata when the session ID is already associated', async () => {
+  const claim = validSampleClaim({ claimId: 'claim-lifecycle-refresh', sessionId: 'session-existing', metadata: {} });
+  const stateAdapter = new InMemoryStateAdapter({ claims: [claim], head: 'v1' });
+  const metadata = {
+    providerSessionId: 'session-existing', rawProviderState: 'QUEUED', normalizedProviderStatus: 'QUEUED',
+    lastObservedAt: '2026-03-31T10:15:00.000Z',
+    providerLifecycleReason: 'Existing session verified; continue monitoring without creating another session.'
+  };
+  const result = await attachSessionToClaim({
+    stateAdapter, claimId: claim.claimId, sessionId: 'session-existing', metadata,
+    now: new Date(metadata.lastObservedAt)
+  });
+  assert.equal(result.decisionCode, CLAIM_CODES.CLAIM_SESSION_ASSOCIATED);
+  assert.equal(result.persistenceConfirmed, true);
+  const persisted = (await stateAdapter.readState()).claims[0];
+  assert.equal(persisted.metadata.providerLifecycleReason, metadata.providerLifecycleReason);
+  assert.equal(persisted.metadata.lastObservedAt, metadata.lastObservedAt);
 });

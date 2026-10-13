@@ -19,7 +19,7 @@ Emit the decision code, timestamp, Issue/PR/session/claim identifiers, failed ch
 - **Evidence scope and freshness:** the evidence record must name the exact `claimId`, repository, Issue number, `verifiedBy`, and ISO `verifiedAt`. Each of `sessions`, `branches`, and `pullRequests` must independently include `verified: true`, the same repository and Issue number, a source identifier, an ISO `observedAt`, and a permitted status. A non-`none` session result must identify the exact inspected session; if the claim already has a `sessionId`, the evidence must match it.
 - **Time bounds:** each domain's `observedAt` must not be later than `verifiedAt` and must not predate the claim. Recovery rejects evidence that is future-dated or more than five minutes old at the moment of recovery.
 - **Verification responsibility:** this claim layer validates the evidence's schema, scope, timestamps, freshness, and audit persistence. It does not itself contact Jules or query GitHub to prove the evidence is true. The future reconciliation/controller layer must only produce this record after the corresponding read-only checks have actually succeeded.
-- **Ambiguous provider creation timeout:** search/reconcile by claim ID and provider metadata before retrying. If it cannot be resolved, stop and escalate.
+- **Ambiguous provider creation timeout:** perform read-only reconciliation by exact claim ID/correlation marker, source, and starting branch. If exactly one session is affirmatively verified, attach it to the durable claim. If no match, multiple matches, malformed/incomplete API data, or reconciliation errors remain, preserve the blocked claim and escalate for human inspection. **Never automatically retry session creation after an ambiguous outcome**, because visibility may be delayed. A human must document authoritative evidence that no session was created before authorizing any later attempt.
 - **Failed or ambiguous state write:** state updates perform exact `claimId` read-back confirmation. If write response is ambiguous and read-back does not confirm the claim, report `CLAIM_PERSISTENCE_FAILED` and do not report success.
 - **Review event for an old PR head:** mark it stale and require review of the current head SHA.
 - **Unsatisfied or ambiguous dependency state (`BLOCK_DEPENDENCY_*`):** verify dependency completion state (`completed` state_reason required) or resolve missing/unplanned dependencies before candidate re-selection.
@@ -30,3 +30,14 @@ Manual or automated claim management must target exact claim IDs (`claimId`):
 - `inspectClaim({ stateAdapter, claimId })`: inspect authoritative state for exact claim record and active lock status.
 - `reconcileAndRecoverClaim({ stateAdapter, claimId, evidence, targetStatus })`: perform atomic compare-and-swap state transition to `RECLAIMED` or `RELEASED` only when complete verified evidence is provided.
 - **No bulk deletion or silent abandonment:** claims must be preserved with full historical reconciliation audit records. Never execute bulk deletion commands on state stores.
+
+
+## Jules API key for manual dispatch
+
+Configure a GitHub Actions repository secret named `JULES_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**. Restrict workflow access to the repository that needs it. Keep the value out of source files, logs, Issues, PRs, and test fixtures. CI and tests must use mocked provider requests and must not read this secret.
+
+Do not enable live dispatch until the disposable-repository pilot and all definition-of-done checks are complete.
+
+## Manual handling of ambiguous creation
+
+A timeout or network error during `POST /v1alpha/sessions` does not prove the request failed. Do not rerun dispatch or submit another create request automatically. Leave the durable claim blocked and inspect the exact Jules session inventory using the correlation marker, source, and starting branch. If exactly one session can be verified, associate that existing session. If evidence is missing, stale, malformed, or has zero/multiple matches, stop and escalate to a human. Record the claim ID, request result, read-only lookup results, and human decision before any further attempt.
