@@ -17,7 +17,7 @@ Imagine we are building a robot:
 
 ### What does Template validation check?
 
-The workflow lives at the repository root in [`.github/workflows/template-ci.yml`](../../../.github/workflows/template-ci.yml). When relevant code or documentation changes, GitHub runs these steps:
+The workflow lives at the repository root in [`.github/workflows/template-ci.yml`](../../.github/workflows/template-ci.yml). When relevant code or documentation changes, GitHub runs these steps:
 
 1. **Set up:** GitHub downloads the version of the code it is checking and starts Node.js 20.
 2. **Syntax checks (`npm run check`):** Node.js checks that the listed code files are written in a form it can read. This catches certain typing and syntax mistakes. It does not prove the whole system works.
