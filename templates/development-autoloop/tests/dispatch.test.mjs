@@ -44,6 +44,7 @@ function sampleConfig(overrides = {}) {
 
 function sampleSnapshot(issueNumber = 42) {
   return {
+    repository: { owner: 'acme', repo: 'autoloop' },
     snapshotComplete: true,
     issues: [
       {
@@ -61,13 +62,15 @@ function sampleSnapshot(issueNumber = 42) {
 }
 
 function samplePacket(overrides = {}) {
+  const issueNumber = overrides.issueNumber ?? 42;
   return {
     repository: 'acme/autoloop',
-    issueNumber: 42,
-    issueTitle: 'Fix issue 42',
+    issueNumber,
+    issueTitle: 'Fix issue ' + issueNumber,
+    issueBody: '## Scope\\nFix issue.',
     startingBranch: 'main',
     prompt: 'Fix the bug in auth',
-    claimId: 'claim-42-test',
+    claimId: 'claim-' + issueNumber + '-test',
     ...overrides
   };
 }
@@ -101,13 +104,20 @@ function createDefaultMockFetch(handlers = {}) {
   };
 }
 
-test('validateDispatchPacket validates correct packets and rejects invalid ones', () => {
+test('validateDispatchPacket validates the full packet contract and rejects missing bindings', () => {
   assert.equal(validateDispatchPacket(samplePacket()).valid, true);
   assert.equal(validateDispatchPacket(null).valid, false);
   assert.equal(validateDispatchPacket(samplePacket({ issueNumber: -1 })).valid, false);
   assert.equal(validateDispatchPacket(samplePacket({ issueTitle: '' })).valid, false);
   assert.equal(validateDispatchPacket(samplePacket({ startingBranch: '' })).valid, false);
   assert.equal(validateDispatchPacket(samplePacket({ prompt: '' })).valid, false);
+  assert.equal(validateDispatchPacket(samplePacket({ claimId: '' })).valid, false);
+  const missingClaimId = samplePacket();
+  delete missingClaimId.claimId;
+  assert.equal(validateDispatchPacket(missingClaimId).valid, false);
+  const missingIssueBody = samplePacket();
+  delete missingIssueBody.issueBody;
+  assert.equal(validateDispatchPacket(missingIssueBody).valid, false);
 });
 
 test('dispatchTask fails when autoloop is disabled', async () => {
@@ -199,6 +209,83 @@ test('dispatchTask fails closed on non-exact confirmation string', async () => {
     const res = await dispatchTask({ config, packet, confirmation: c, stateAdapter, snapshot: sampleSnapshot(42) });
     assert.equal(res.success, false);
     assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_CONFIRMATION_INVALID);
+  }
+});
+
+
+test('dispatchTask blocks an invalid schema config at the execution boundary', async () => {
+  const config = sampleConfig({ maxConcurrentSessions: 0 });
+  const packet = samplePacket();
+  const stateAdapter = new InMemoryStateAdapter();
+  let providerRequests = 0;
+  const providerClient = {
+    apiKey: 'test-key',
+    async findSourceForRepository() { providerRequests++; throw new Error('must not call provider'); }
+  };
+
+  const res = await dispatchTask({
+    config, packet, confirmation: 'DISPATCH', stateAdapter,
+    snapshot: sampleSnapshot(42), providerClient
+  });
+
+  assert.equal(res.success, false);
+  assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED);
+  assert.equal(res.reason, 'Configuration failed schema validation.');
+  assert.ok(res.blockers.length > 0);
+  assert.equal(providerRequests, 0);
+  assert.equal((await stateAdapter.readState()).claims.length, 0);
+});
+
+test('dispatchTask blocks snapshots from missing or mismatched repositories before provider calls', async () => {
+  const snapshots = [
+    (() => { const s = sampleSnapshot(42); delete s.repository; return s; })(),
+    (() => { const s = sampleSnapshot(42); s.repository.repo = 'wrong-repo'; return s; })(),
+    { ...sampleSnapshot(42), repository: { owner: 'someone-else', repo: 'other' } }
+  ];
+
+  for (const snapshot of snapshots) {
+    const stateAdapter = new InMemoryStateAdapter();
+    let providerRequests = 0;
+    const providerClient = {
+      apiKey: 'test-key',
+      async findSourceForRepository() { providerRequests++; throw new Error('must not call provider'); }
+    };
+
+    const res = await dispatchTask({
+      config: sampleConfig(), packet: samplePacket(), confirmation: 'DISPATCH',
+      stateAdapter, snapshot, providerClient
+    });
+
+    assert.equal(res.success, false);
+    assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED);
+    assert.match(res.reason, /snapshot repository identity/i);
+    assert.equal(providerRequests, 0);
+    assert.equal((await stateAdapter.readState()).claims.length, 0);
+  }
+});
+
+test('dispatchTask blocks Issue title or body drift against authoritative snapshot', async () => {
+  for (const packet of [
+    samplePacket({ issueTitle: 'Different issue title' }),
+    samplePacket({ issueBody: '## Scope\\nDifferent issue body' })
+  ]) {
+    const stateAdapter = new InMemoryStateAdapter();
+    let providerRequests = 0;
+    const providerClient = {
+      apiKey: 'test-key',
+      async findSourceForRepository() { providerRequests++; throw new Error('must not call provider'); }
+    };
+
+    const res = await dispatchTask({
+      config: sampleConfig(), packet, confirmation: 'DISPATCH',
+      stateAdapter, snapshot: sampleSnapshot(42), providerClient
+    });
+
+    assert.equal(res.success, false);
+    assert.equal(res.decisionCode, DISPATCH_CODES.DISPATCH_INVALID_PACKET);
+    assert.match(res.reason, /title\\/body do not exactly match/i);
+    assert.equal(providerRequests, 0);
+    assert.equal((await stateAdapter.readState()).claims.length, 0);
   }
 });
 

@@ -7,6 +7,7 @@
 import { acquireClaim, attachSessionToClaim, normalizeRepositoryIdentity, CLAIM_CODES } from './claims.mjs';
 import { JulesClient, sanitizeJulesErrorMessage, JULES_STATE_NORMALIZED } from './jules.mjs';
 import { selectCandidateIssue } from './selection.mjs';
+import { validateConfig } from './config.mjs';
 
 export const DISPATCH_CODES = Object.freeze({
   DISPATCH_SUCCESS: 'DISPATCH_SUCCESS',
@@ -35,6 +36,14 @@ export function validateDispatchPacket(packet) {
   const repoCheck = normalizeRepositoryIdentity(packet.repository);
   if (!repoCheck.valid) {
     return { valid: false, reason: 'Dispatch packet must contain a valid repository identity.' };
+  }
+
+  if (typeof packet.claimId !== 'string' || !packet.claimId.trim()) {
+    return { valid: false, reason: 'Dispatch packet must contain a stable, non-empty claimId.' };
+  }
+
+  if (typeof packet.issueBody !== 'string') {
+    return { valid: false, reason: 'Dispatch packet must contain the exact Issue body as a string.' };
   }
 
   if (typeof packet.issueNumber !== 'number' || !Number.isInteger(packet.issueNumber) || packet.issueNumber < 1) {
@@ -94,15 +103,18 @@ export async function dispatchTask({
     };
   }
 
-  if (!config || typeof config !== 'object') {
+  const configCheck = validateConfig(config);
+  if (!configCheck.valid) {
     return {
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
-      reason: 'Configuration object is missing or invalid.',
+      reason: 'Configuration failed schema validation.',
+      blockers: configCheck.errors,
       session: null,
       claim: null
     };
   }
+  config = configCheck.config;
 
   if (config.enabled !== true) {
     return {
@@ -148,6 +160,22 @@ export async function dispatchTask({
     };
   }
 
+  // The snapshot identity is part of the dispatch contract. A complete-looking snapshot
+  // for another or unknown repository must never authorize provider work.
+  const packetRepo = normalizeRepositoryIdentity(packet.repository).repository;
+  const snapshotRepoCheck = normalizeRepositoryIdentity(snapshot?.repository);
+  if (!snapshotRepoCheck.valid
+    || snapshotRepoCheck.repository.owner !== packetRepo.owner
+    || snapshotRepoCheck.repository.repo !== packetRepo.repo) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
+      reason: 'Authoritative snapshot repository identity is missing or does not match the dispatch packet repository.',
+      session: null,
+      claim: null
+    };
+  }
+
   // Mandatory Preflight and Issue Selection Gate recomputed from snapshot (never trust caller selectionResult)
   if (!snapshot) {
     return {
@@ -165,6 +193,22 @@ export async function dispatchTask({
       success: false,
       decisionCode: DISPATCH_CODES.DISPATCH_PREFLIGHT_BLOCKED,
       reason: `Preflight/selection gate blocked dispatch for Issue #${packet.issueNumber} (${evalSelection.decisionCode}): ${evalSelection.reason}`,
+      session: null,
+      claim: null,
+      selectionResult: evalSelection
+    };
+  }
+
+  const selectedIssue = snapshot.issues.find((issue) => issue && issue.number === packet.issueNumber);
+  if (!selectedIssue
+    || typeof selectedIssue.title !== 'string'
+    || typeof selectedIssue.body !== 'string'
+    || packet.issueTitle !== selectedIssue.title
+    || packet.issueBody !== selectedIssue.body) {
+    return {
+      success: false,
+      decisionCode: DISPATCH_CODES.DISPATCH_INVALID_PACKET,
+      reason: 'Dispatch packet Issue title/body do not exactly match the selected Issue in the authoritative snapshot.',
       session: null,
       claim: null,
       selectionResult: evalSelection
@@ -215,7 +259,7 @@ export async function dispatchTask({
   }
 
   // Step 1: Acquire durable claim BEFORE calling provider session creation
-  const claimId = packet.claimId || `claim-${packet.issueNumber}-${currentDate.getTime()}`;
+  const claimId = packet.claimId.trim();
   const claimRes = await acquireClaim({
     stateAdapter,
     repository: targetRepo,
