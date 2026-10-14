@@ -153,11 +153,12 @@ async function run() {
   let checkRuns = [];
   let comments = [];
   try {
-    if (eventName === 'pull_request_review') {
+    const isHeadSync = eventName === 'pull_request_target' && eventAction === 'synchronize';
+    if (eventName === 'pull_request_review' || isHeadSync) {
       reviews = await fetchAllPages('/pulls/' + prNumber + '/reviews');
       if (!reviews.some(item => String(item?.id) === String(reviewEvent?.id)) && reviewEvent) reviews.push(reviewEvent);
     }
-    if (reviewEvent && ['APPROVED', 'CHANGES_REQUESTED'].includes(String(reviewEvent.state || '').toUpperCase())) {
+    if (eventName === 'pull_request_review' || isHeadSync) {
       checkRuns = await fetchAllPages('/commits/' + encodeURIComponent(currentHead) + '/check-runs', 'check_runs');
     }
   } catch (error) {
@@ -173,7 +174,72 @@ async function run() {
     governingIssueNumber: governing.number
   });
 
+  // A pushed repair is evidence, not approval. Report current-head paths/checks
+  // and prior trusted findings; the new SHA still requires an explicit review.
+  if (eventName === 'pull_request_target' && eventAction === 'synchronize') {
+    try {
+      const changedFiles = await fetchAllPages('/pulls/' + prNumber + '/files');
+      const headCommit = await api('/commits/' + encodeURIComponent(currentHead));
+      const parentSha = headCommit?.parents?.[0]?.sha;
+      let parentCommit = null;
+      if (isSha(parentSha)) parentCommit = await api('/commits/' + encodeURIComponent(parentSha));
+      const requiredCheckEvidence = (Array.isArray(config.requiredChecks) ? config.requiredChecks : []).map(name => {
+        const matching = checkRuns.filter(run => run && run.name === name && String(run.head_sha || '').toLowerCase() === currentHead.toLowerCase())
+          .sort((a, b) => String(b.completed_at || b.started_at || '').localeCompare(String(a.completed_at || a.started_at || '')));
+        const check = matching[0];
+        return { name, status: check?.status || 'missing', conclusion: check?.conclusion || null,
+          headSha: currentHead, passed: Boolean(check && check.status === 'completed' && check.conclusion === 'success') };
+      });
+      const priorFindings = reviews
+        .filter(item => ['CHANGES_REQUESTED', 'DISMISSED'].includes(String(item?.state || '').toUpperCase())
+          && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase()))
+        .map(item => ({ reviewId: item.id ?? null, reviewer: item.user?.login ?? null, state: item.state,
+          reviewedHeadSha: item.commit_id ?? null, body: String(item.body || '').slice(0, 1200) }));
+      decision = {
+        ...decision,
+        repairEvidence: {
+          currentHeadSha: currentHead,
+          changedPaths: changedFiles.map(item => item?.filename).filter(path => typeof path === 'string').sort(),
+          requiredChecks: requiredCheckEvidence,
+          previousHeadTreeChanged: Boolean(headCommit?.commit?.tree?.sha && parentCommit?.commit?.tree?.sha
+            && headCommit.commit.tree.sha !== parentCommit.commit.tree.sha),
+          previousTrustedFindings: priorFindings,
+          automaticFindingResolution: false,
+          status: 'WAITING_FOR_CURRENT_HEAD_REVIEW',
+          note: 'This report proves only what changed and which checks belong to this SHA. A trusted reviewer must explicitly say which findings are fixed or remain; no repair is marked satisfied automatically.'
+        }
+      };
+    } catch {
+      decision = {
+        ...decision,
+        success: false,
+        decisionCode: 'BLOCK_REPAIR_EVIDENCE_UNAVAILABLE',
+        reason: 'The new head was observed, but its changed paths, parent tree, prior findings, or exact-head checks could not be verified completely.',
+        nextAction: 'Retry the read-only evidence collection. Do not mark the repair successful or carry forward the previous approval.',
+        repairEvidence: null
+      };
+    }
+    emit(decision);
+    return;
+  }
+
   if (decision.decisionCode === 'BLOCK_REPAIR_CONTEXT_MISSING' && governing.number) {
+    // Check the durable comment marker before requiring live provider context.
+    // This keeps a replay idempotent even after the original task is reconciled.
+    try {
+      comments = await fetchAllPages('/issues/' + prNumber + '/comments');
+      const priorKeys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\\s]+) -->/g)].map(match => match[1]));
+      if (decision.eventKey && priorKeys.includes(decision.eventKey)) {
+        emit({ ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
+          commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' });
+        return;
+      }
+    } catch {
+      fail('BLOCK_DEDUPLICATION_LOOKUP_FAILED', 'Existing PR comments could not be read before checking for a duplicate repair handoff.',
+        'Retry after GitHub can return the complete comment inventory. No handoff or session was created.',
+        { pullRequestNumber: prNumber, headSha: currentHead });
+      return;
+    }
     if (!julesApiKey) {
       fail('BLOCK_PROVIDER_ACCESS_MISSING', 'JULES_API_KEY is required to verify the existing task before recording a repair handoff.',
         'Configure the protected autoloop-dispatch Environment secret. No repair session was created.',
