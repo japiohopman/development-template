@@ -11,6 +11,12 @@ test('autoloop workflow is manual-only (workflow_dispatch) and requires confirm_
   assert.doesNotMatch(workflow, /^\s+(push|pull_request|schedule):/m);
 });
 
+test('autoloop workflow protects JULES_API_KEY with autoloop-dispatch environment and default-branch ref check', () => {
+  assert.match(workflow, /environment:\s*autoloop-dispatch/);
+  assert.match(workflow, /github\.ref != format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
+  assert.match(workflow, /ref:\s*\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}/);
+});
+
 test('autoloop workflow grants only read permissions', () => {
   const match = workflow.match(/^permissions:\n([\s\S]*?)\n\njobs:/m);
   assert.ok(match, 'top-level permissions must be explicit');
@@ -27,9 +33,10 @@ test('autoloop workflow passes repository confirmation and environment variables
   assert.doesNotMatch(workflow, /permissions:[\s\S]*?contents:\s*write/);
 });
 
-test('autoloop runner is strictly GET-only and enforces repository confirmation', () => {
+test('autoloop runner is strictly GET-only and enforces repository confirmation and ref trust', () => {
   assert.match(runner, /confirmation !== repositoryValue/);
+  assert.match(runner, /currentRef !== 'refs\/heads\/' \+ defaultBranch/);
   assert.match(runner, /method !== 'GET'/);
   assert.doesNotMatch(runner, /method:\s*'POST'|method:\s*'PATCH'|method:\s*'PUT'|method:\s*'DELETE'/);
-  assert.match(runner, /selectCandidateIssue/);
+  assert.match(runner, /reconcileSessionLifecycle/);
 });

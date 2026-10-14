@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { validateConfig } from '../src/config.mjs';
 import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.mjs';
 import { selectCandidateIssue } from '../src/selection.mjs';
+import { reconcileSessionLifecycle } from '../src/reconciliation.mjs';
 import { JulesClient } from '../src/jules.mjs';
 
 const repositoryValue = process.env.GITHUB_REPOSITORY;
@@ -11,6 +12,7 @@ const confirmation = process.env.CONFIRM_REPOSITORY;
 const julesApiKey = process.env.JULES_API_KEY;
 const stateBranch = process.env.AUTOLOOP_STATE_BRANCH || 'autoloop-state';
 const configPath = resolve(process.env.AUTOLOOP_CONFIG_PATH || 'config/autoloop.json');
+const currentRef = process.env.GITHUB_REF || '';
 
 function printReport(report) {
   console.log(JSON.stringify(report, null, 2));
@@ -94,6 +96,19 @@ async function run() {
   }
   const config = configValidation.config;
 
+  const defaultBranch = config.defaultBranch || 'main';
+  if (currentRef && currentRef !== 'refs/heads/' + defaultBranch) {
+    const report = buildReport({
+      success: false,
+      decisionCode: 'BLOCK_UNTRUSTED_REF',
+      reason: 'Autoloop dispatch runner executed on ref \'' + currentRef + '\' which does not match configured default branch \'' + defaultBranch + '\'.',
+      nextAction: 'Trigger autoloop dispatch from the repository default branch only.'
+    });
+    printReport(report);
+    process.exitCode = 1;
+    return;
+  }
+
   const repo = repoCheck.repository;
 
   const api = async (path, options = {}) => {
@@ -138,7 +153,13 @@ async function run() {
   };
 
   let snapshot = null;
+  let reconciliationReport = null;
   try {
+    const defaultBranchData = await api('/repos/' + repo.owner + '/' + repo.repo + '/branches/' + encodeURIComponent(defaultBranch));
+    if (!defaultBranchData || typeof defaultBranchData.name !== 'string' || defaultBranchData.name !== defaultBranch) {
+      throw new Error('Default branch ' + defaultBranch + ' was not found or returned an invalid response.');
+    }
+
     const rawIssuesAndPRs = await fetchAllGithubPages('/repos/' + repo.owner + '/' + repo.repo + '/issues?state=all');
     const rawOpenPRs = await fetchAllGithubPages('/repos/' + repo.owner + '/' + repo.repo + '/pulls?state=open');
 
@@ -163,7 +184,8 @@ async function run() {
         throw new Error('Claim state file claims.json contains a malformed claim record (' + (c?.claimId ?? 'unknown') + ').');
       }
     }
-    const claims = parsedClaimsFile.claims.map(c => ({
+    const rawClaims = parsedClaimsFile.claims;
+    const claims = rawClaims.map(c => ({
       ...c,
       reconciled: c.reconciliationStatus === 'RECONCILED'
     }));
@@ -173,6 +195,29 @@ async function run() {
     }
     const providerClient = new JulesClient({ apiKey: julesApiKey });
     const sessions = await providerClient.listSessions();
+
+    const fetchBranch = async (name) => api('/repos/' + repo.owner + '/' + repo.repo + '/branches/' + encodeURIComponent(name));
+    const fetchIssue = async (number) => api('/repos/' + repo.owner + '/' + repo.repo + '/issues/' + number);
+    const fetchPullRequest = async (number) => api('/repos/' + repo.owner + '/' + repo.repo + '/pulls/' + number);
+    const stateAdapter = {
+      async readState() {
+        return { head: headSha, claims: rawClaims };
+      }
+    };
+
+    reconciliationReport = await reconcileSessionLifecycle({
+      config,
+      repository: repo,
+      providerClient,
+      fetchPullRequest,
+      fetchIssue,
+      fetchBranch,
+      stateAdapter
+    });
+
+    if (!reconciliationReport || (!reconciliationReport.success && reconciliationReport.decisionCode !== 'RECONCILIATION_CLEAR' && reconciliationReport.decisionCode !== 'RECONCILIATION_BLOCKED')) {
+      throw new Error('Session lifecycle reconciliation failed (' + (reconciliationReport?.decisionCode || 'UNKNOWN') + '): ' + (reconciliationReport?.summary || 'unverified state'));
+    }
 
     snapshot = {
       snapshotComplete: true,
@@ -198,21 +243,35 @@ async function run() {
 
   const selectionResult = selectCandidateIssue(snapshot, config);
 
+  const combinedBlockers = [
+    ...(reconciliationReport?.blockers || []),
+    ...(selectionResult.blockers || [])
+  ];
+
   const isCleanOutcome = selectionResult.decisionCode === 'CANDIDATE_SELECTED' || selectionResult.decisionCode === 'NO_ELIGIBLE_CANDIDATE';
+  const isReconciliationClear = reconciliationReport?.success === true;
+
+  const finalSuccess = isCleanOutcome && isReconciliationClear;
 
   const report = buildReport({
-    success: isCleanOutcome,
-    selectedCandidate: selectionResult.selectedCandidate,
-    decisionCode: selectionResult.decisionCode,
-    reason: selectionResult.reason,
-    blockers: selectionResult.blockers || [],
+    success: finalSuccess,
+    selectedCandidate: finalSuccess ? selectionResult.selectedCandidate : null,
+    decisionCode: !isReconciliationClear
+      ? 'RECONCILIATION_BLOCKED'
+      : selectionResult.decisionCode,
+    reason: !isReconciliationClear
+      ? (reconciliationReport.summary || 'Lifecycle reconciliation detected active work or evidence gaps.')
+      : selectionResult.reason,
+    blockers: combinedBlockers,
     evaluatedCandidates: selectionResult.evaluatedCandidates || [],
-    nextAction: selectionResult.nextAction || 'Inspect decision output.'
+    nextAction: finalSuccess
+      ? selectionResult.nextAction
+      : 'Resolve lifecycle reconciliation and candidate blockers before re-running autoloop dispatch.'
   });
 
   printReport(report);
 
-  if (!isCleanOutcome) {
+  if (!finalSuccess) {
     process.exitCode = 1;
   }
 }

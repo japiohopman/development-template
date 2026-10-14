@@ -26,11 +26,25 @@ function mockSource(scenario) {
     "globalThis.fetch = async (input, options = {}) => {",
     "  const url = new URL(String(input));",
     "  const path = url.pathname;",
+    "  if (path === '/v1alpha/sources') {",
+    "    return reply({ sources: [{ name: 'sources/github/example/project', githubRepo: { owner: 'example', repo: 'project' } }] });",
+    "  }",
+    "  if (path === '/v1alpha/sources/github/example/project') {",
+    "    return reply({ name: 'sources/github/example/project', githubRepo: { owner: 'example', repo: 'project', branches: ['main'] } });",
+    "  }",
     "  if (path.startsWith('/v1alpha/sessions')) {",
     "    if (scenario === 'sessions-failure') return reply({ message: 'Provider Error' }, 500);",
     "    return reply({ sessions: [] });",
     "  }",
     "  if (options.method && options.method !== 'GET') throw new Error('Only GET calls are allowed in this mock.');",
+    "  if (path.startsWith('/repos/example/project/branches/')) {",
+    "    if (scenario === 'missing-default-branch') return reply({ message: 'Not Found' }, 404);",
+    "    const branchName = path.split('/').pop();",
+    "    return reply({ name: decodeURIComponent(branchName) });",
+    "  }",
+    "  if (path === '/repos/example/project/issues/1') {",
+    "    return reply(issue);",
+    "  }",
     "  if (path.startsWith('/repos/example/project/issues')) {",
     "    if (scenario === 'api-failure') return reply({ message: 'Internal Server Error' }, 500);",
     "    if (scenario === 'open-pr') return reply([issue, { number: 2, title: 'PR', pull_request: {} }]);",
@@ -133,6 +147,7 @@ function runRunner(t, scenario, envOverrides = {}) {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
 
   const exampleConfig = JSON.parse(readFileSync(join(templateRoot, 'config/autoloop.example.json'), 'utf8'));
+  exampleConfig.workProvider = 'jules';
   const configPath = join(directory, 'autoloop.json');
   const preloadPath = join(directory, 'mock-fetch.mjs');
 
@@ -151,6 +166,7 @@ function runRunner(t, scenario, envOverrides = {}) {
     CONFIRM_REPOSITORY: 'example/project',
     JULES_API_KEY: 'mock-jules-key-not-a-real-secret',
     AUTOLOOP_CONFIG_PATH: configPath,
+    GITHUB_REF: 'refs/heads/main',
     ...envOverrides
   };
 
@@ -183,6 +199,23 @@ test('unconfirmed repository fails closed before making API requests', t => {
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
   assert.equal(result.report.decisionCode, 'BLOCK_REPOSITORY_UNCONFIRMED');
+});
+
+test('untrusted ref fails closed before snapshot collection', t => {
+  const result = runRunner(t, 'pass', { GITHUB_REF: 'refs/heads/feature-branch' });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_UNTRUSTED_REF');
+});
+
+test('missing default branch fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
+  const result = runRunner(t, 'missing-default-branch');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /Default branch|branches\/main/i);
 });
 
 test('an API failure during snapshot collection blocks closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
@@ -250,7 +283,7 @@ test('candidate with an active claim blocks selection', t => {
   assert.notEqual(result.status, 0);
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
-  assert.equal(result.report.decisionCode, 'BLOCK_ACTIVE_CLAIM');
+  assert.equal(result.report.decisionCode, 'RECONCILIATION_BLOCKED');
 });
 
 test('candidate with an expired unreconciled claim blocks selection', t => {
@@ -258,7 +291,7 @@ test('candidate with an expired unreconciled claim blocks selection', t => {
   assert.notEqual(result.status, 0);
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
-  assert.equal(result.report.decisionCode, 'BLOCK_ACTIVE_CLAIM');
+  assert.equal(result.report.decisionCode, 'RECONCILIATION_BLOCKED');
 });
 
 test('candidate with a RELEASED + RECONCILED claim is not blocked', t => {
