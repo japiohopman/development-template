@@ -78,11 +78,13 @@ The configuration is project-neutral. Do not add product-specific assumptions to
 
 The catalog repository's settings and secrets do **not** copy into a consuming repository.
 
-- **PR contract gate:** no custom secret is required. GitHub supplies GITHUB_TOKEN to Actions, and this workflow needs only read permissions for repository contents, Issues, pull requests, and check runs.
-- **Manual read-only session reconciliation:** set a repository Actions secret named JULES_API_KEY only if you install and use reconcile-readonly.yml, because that workflow reads the provider's session inventory. Do not put the key in a configuration file, source code, test fixture, Issue, PR body, or log.
-- **GitHub Environment:** the current template workflows do not declare an environment. No named Environment is used by these workflows. Therefore, a secret belongs in the repository's Actions secrets unless the workflow is deliberately changed to reference an Environment and that change is reviewed.
+1. **Create the Actions Environment:** In the consumer repository settings under **Settings → Environments**, create a GitHub Actions Environment named `autoloop-dispatch`.
+2. **Restrict Deployment Branches:** Configure `autoloop-dispatch` deployment branch policies to permit execution from the repository's default branch (`main`) only. *Note: this branch policy restriction is a manual repository setting in GitHub settings and is not created automatically by workflow YAML files.*
+3. **Store JULES_API_KEY as an Environment Secret:** Store `JULES_API_KEY` as an Environment secret within `autoloop-dispatch`. Do **not** store `JULES_API_KEY` as a repository-level secret, and avoid leaving duplicate repository-level secrets available to non-default branches. Never put API keys in configuration files, source code, test fixtures, Issues, PR bodies, or logs.
+4. **Workflow Environment Access:** Both `autoloop-dispatch.yml` and `reconcile-readonly.yml` declare `environment: autoloop-dispatch`. When executed, GitHub Actions resolves `JULES_API_KEY` through the `autoloop-dispatch` Environment boundary after verifying default-branch branch protection rules.
+5. **PR contract gate:** No custom secret is required for `pr-contract-gate.yml`. GitHub supplies standard `GITHUB_TOKEN` to Actions with read permissions.
 
-AUTOLOOP_STATE_BRANCH is an optional repository variable for the manual reconciliation workflow. It defaults to autoloop-state. Missing or uninitialized claim state is a blocker, not an empty queue.
+AUTOLOOP_STATE_BRANCH is an optional repository variable for the manual reconciliation and dispatcher workflows. It defaults to autoloop-state. Missing or uninitialized claim state is a blocker, not an empty queue.
 
 ## Run the tests in the template folder
 
