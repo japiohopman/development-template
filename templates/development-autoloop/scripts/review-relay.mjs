@@ -85,8 +85,11 @@ async function run() {
 
   const apiBase = 'https://api.github.com/repos/' + repo.owner + '/' + repo.repo;
   const api = async (path, method = 'GET', payload = null) => {
-    if (method !== 'GET' && !(method === 'POST' && path === '/issues/' + prNumber + '/comments')) {
-      throw new Error('Review relay permits only GitHub GET requests and one auditable PR-comment POST.');
+    const allowedWrite = (method === 'POST' && (
+      path === '/issues/' + prNumber + '/comments' || path === '/check-runs'
+    )) || (method === 'PATCH' && /^\/check-runs\/\d+$/.test(path));
+    if (method !== 'GET' && !allowedWrite) {
+      throw new Error('Review relay permits only GitHub GET requests, auditable PR-comment POSTs, and managed check-run writes.');
     }
     const response = await fetch(apiBase + path, {
       method, redirect: 'error',
@@ -211,6 +214,50 @@ async function run() {
       'Retry when review and check APIs can be read completely; missing data is not an approval.', { pullRequestNumber: prNumber, headSha: currentHead });
     return;
   }
+
+  const publishDecisionCheck = async decision => {
+    // Persist the relay result as one managed check run on this exact SHA.
+    // Refresh PR metadata immediately before writing to avoid authorizing a stale head.
+    const latestPr = await api('/pulls/' + prNumber);
+    if (String(latestPr?.head?.sha || '').toLowerCase() !== currentHead.toLowerCase()) {
+      throw new Error('PR head changed while review evidence was being evaluated.');
+    }
+    const checkName = 'Autoloop trusted review relay';
+    const externalId = 'autoloop-review-relay:' + repositoryValue.toLowerCase() + ':pr:' + prNumber;
+    const allRuns = await fetchAllPages('/commits/' + encodeURIComponent(currentHead)
+      + '/check-runs?check_name=' + encodeURIComponent(checkName), 'check_runs');
+    const owned = allRuns.filter(run => run && run.name === checkName && run.external_id === externalId
+      && String(run.head_sha || '').toLowerCase() === currentHead.toLowerCase())
+      .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0];
+    const neutralOutcomes = new Set([
+      'ACKNOWLEDGEMENT_IGNORED', 'IGNORED_UNTRUSTED_ACTOR', 'IGNORED_UNTRUSTED_REVIEWER',
+      'IGNORED_UNSUPPORTED_EVENT', 'IGNORED_NON_VERDICT_REVIEW', 'DUPLICATE_EVENT_IGNORED'
+    ]);
+    const conclusion = decision.decisionCode === 'APPROVED_CURRENT_HEAD'
+      ? 'success'
+      : (neutralOutcomes.has(decision.decisionCode) ? 'neutral' : 'action_required');
+    const stamp = new Date().toISOString();
+    const summary = [
+      'Decision: ' + String(decision.decisionCode || 'UNKNOWN'),
+      '',
+      String(decision.reason || 'No further details.'),
+      '',
+      'Next action: ' + String(decision.nextAction || 'Inspect the Actions report.'),
+      '',
+      'Current PR head: ' + currentHead,
+      'State changes are limited to this check run and any separately reported audit comment. No provider task is started.'
+    ].join('\n').slice(0, 60000);
+    const output = { title: String(decision.decisionCode || 'Unknown review decision').slice(0, 250), summary };
+    if (owned) {
+      await api('/check-runs/' + owned.id, 'PATCH', { status: 'completed', conclusion, completed_at: stamp, output });
+      return { ...decision, mutated: true, decisionCheckRunId: owned.id, decisionCheckName: checkName, checkConclusion: conclusion };
+    }
+    const created = await api('/check-runs', 'POST', {
+      name: checkName, head_sha: currentHead, external_id: externalId,
+      status: 'completed', conclusion, started_at: stamp, completed_at: stamp, output
+    });
+    return { ...decision, mutated: true, decisionCheckRunId: created.id ?? null, decisionCheckName: checkName, checkConclusion: conclusion };
+  };
 
   const governing = extractGoverningIssueNumber(pullRequest.body || '', repositoryValue);
   let decision = evaluateReviewRelay({
@@ -418,6 +465,17 @@ async function run() {
         { pullRequestNumber: prNumber, headSha: currentHead, eventKey: decision.eventKey });
     }
     return;
+  }
+  if (decision.decisionCode !== 'DUPLICATE_EVENT_IGNORED') {
+    try {
+      decision = await publishDecisionCheck(decision);
+    } catch (error) {
+      fail('BLOCK_RELAY_CHECK_WRITE_FAILED',
+        'The review decision was evaluated but GitHub could not record the per-head relay check (' + (error?.status ? 'HTTP ' + error.status : 'write/read failed') + ').',
+        'Inspect the current PR head and Actions logs before retrying. A stale head is never approved by this relay.',
+        { pullRequestNumber: prNumber, headSha: currentHead, mutated: Boolean(decision.mutated) });
+      return;
+    }
   }
   emit(decision);
 }
