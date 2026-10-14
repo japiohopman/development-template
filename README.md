@@ -23,7 +23,7 @@ The template is not ready for unattended use until the full loop has been tested
 
 | Template | Status | Purpose |
 | --- | --- | --- |
-| Development Autoloop | Foundation — not live-enabled | Reusable building blocks and consumer workflows for an Issue → coding agent → PR → review cycle. The automatic dispatcher and complete review relay are not yet connected end to end. |
+| Development Autoloop | Foundation — not live-enabled | Reusable building blocks and consumer workflows for an Issue → coding agent → PR → review cycle. A plan-only dispatcher and guarded review-relay foundation are implemented; live repair dispatch and the disposable pilot remain outstanding. |
 
 See the [Development Autoloop README](templates/development-autoloop/README.md).
 
@@ -50,7 +50,7 @@ Workflow files stored under templates/development-autoloop/.github/workflows/ ar
 
 ## Current state and next steps
 
-The template has tested logic for configuration, contracts, selection, durable claims, provider dispatch, and session/Issue/branch/PR reconciliation. The PR contract gate is being added as its own read-only gate. The missing connection from Issue discovery and preflight into a real Actions dispatcher is now explicitly tracked as [Issue #19](https://github.com/japiohopman/development-template/issues/19). The trusted review relay and complete disposable-repository pilot remain future work.
+The template has tested logic for configuration, contracts, selection, durable claims, provider dispatch, and session/Issue/branch/PR reconciliation. The PR contract gate is being added as its own read-only gate. The missing connection from Issue discovery and preflight into a real Actions dispatcher is now explicitly tracked as [Issue #19](https://github.com/japiohopman/development-template/issues/19). The guarded trusted-review relay foundation is now tracked in [Issue #8](https://github.com/japiohopman/development-template/issues/8); live repair dispatch and the complete disposable-repository pilot remain future work.
 
 Follow the template's [architecture](templates/development-autoloop/docs/ARCHITECTURE.md), [implementation plan](templates/development-autoloop/docs/IMPLEMENTATION_PLAN.md), [recovery notes](templates/development-autoloop/docs/RECOVERY.md), and [template standards](docs/TEMPLATE_STANDARDS.md).
 
@@ -61,7 +61,7 @@ Follow the template's [architecture](templates/development-autoloop/docs/ARCHITE
 - Fail safely: missing data, unknown states, conflicting claims, partial pages, or failed API calls stop the automation rather than trigger a guess.
 - Workflow-first: Actions orchestrates; scripts gather evidence; source modules decide; tests prove behavior.
 - Human control: live dispatch must be deliberately enabled; human merge approval remains the default.
-- Keep secrets private: API keys belong in the consuming repository's secret settings, never in code, tests, README files, Issues, PR comments, or logs.
+- Keep secrets private: use the documented protected GitHub Environment secrets for provider keys, never code, tests, README files, Issues, PR comments, or logs.
 
 ## Repository layout
 
