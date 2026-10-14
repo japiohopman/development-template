@@ -238,13 +238,9 @@ async function run() {
     const owned = allRuns.filter(run => run && run.name === checkName && run.external_id === externalId
       && String(run.head_sha || '').toLowerCase() === currentHead.toLowerCase())
       .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0];
-    const neutralOutcomes = new Set([
-      'ACKNOWLEDGEMENT_IGNORED', 'IGNORED_UNTRUSTED_ACTOR', 'IGNORED_UNTRUSTED_REVIEWER',
-      'IGNORED_UNSUPPORTED_EVENT', 'IGNORED_NON_VERDICT_REVIEW'
-    ]);
-    const conclusion = decision.decisionCode === 'APPROVED_CURRENT_HEAD'
-      ? 'success'
-      : (neutralOutcomes.has(decision.decisionCode) ? 'neutral' : 'action_required');
+    // Only a fully verified current-head approval may leave a success conclusion.
+    // Dismissals, stale evidence, acknowledgements and all blockers stay non-green.
+    const conclusion = decision.decisionCode === 'APPROVED_CURRENT_HEAD' ? 'success' : 'action_required';
     const stamp = new Date().toISOString();
     const summary = [
       'Decision: ' + String(decision.decisionCode || 'UNKNOWN'),
