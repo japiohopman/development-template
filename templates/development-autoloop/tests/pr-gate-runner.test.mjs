@@ -95,8 +95,6 @@ function mockSource(scenario) {
     "    return reply(issue);",
     "  }",
     "  if (path === '/repos/example/project/pulls/17/files') return reply([{ filename: " + JSON.stringify(changedPath) + " }]);",
-    "  if (path === '/repos/example/project/commits/' + " + JSON.stringify(HEAD) + ") return reply(checkRuns);",
-    "  if (path === '/repos/example/project/commits/' + " + JSON.stringify(HEAD) + '/check-runs') return reply(checkRuns);",
     "  if (path === '/repos/example/project/commits/' + " + JSON.stringify(HEAD) + '/check-runs') return reply(checkRuns);",
     "  if (path === '/repos/example/project/commits/" + HEAD + "') return reply(headCommit);",
     "  if (path === '/repos/example/project/commits/" + PARENT + "') return reply(parentCommit);",
