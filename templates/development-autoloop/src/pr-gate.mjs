@@ -27,7 +27,7 @@ function hasUsefulText(value) {
 function readSectionValue(section, label) {
   if (typeof section !== 'string') return null;
   const escaped = label.replace(/[.*+?^|()[\]\\]/g, '\\$&').replace(/\//g, '\\/');
-  const match = section.match(new RegExp('^\\s*(?:[-*]\\s*)?' + escaped + ':\\s*(.*?)\\s*$', 'im'));
+  const match = section.match(new RegExp('^[ \t]*(?:[-*][ \t]*)?' + escaped + ':[ \t]*(.*?)[ \t]*$', 'im'));
   return match ? match[1].trim() : null;
 }
 
