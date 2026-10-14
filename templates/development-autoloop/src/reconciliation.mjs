@@ -8,8 +8,7 @@ import {
   sessionDisposition,
   isOpenPullRequest,
   isMergedPullRequest,
-  extractPullRequestNumber,
-  findSessionPullRequest
+  extractPullRequestNumber
 } from './preflight.mjs';
 
 const report = (decisionCode, repository, blockers, details = {}) => ({
