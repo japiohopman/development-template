@@ -71,12 +71,28 @@ async function run() {
   }
 
   const isIssueComment = eventName === 'issue_comment';
+  const upstreamRun = event?.workflow_run;
+  const isTrustedObserverRun = eventName === 'workflow_run'
+    && upstreamRun?.name === 'Observe PR review event (unprivileged)'
+    && upstreamRun?.event === 'pull_request_review'
+    && upstreamRun?.conclusion === 'success'
+    && Array.isArray(upstreamRun?.pull_requests)
+    && upstreamRun.pull_requests.length === 1
+    && Number.isInteger(Number(upstreamRun.pull_requests[0]?.number))
+    && Number(upstreamRun.pull_requests[0].number) > 0;
+  if (eventName === 'workflow_run' && !isTrustedObserverRun) {
+    fail('BLOCK_UNTRUSTED_WORKFLOW_RUN', 'Only the successful no-secret PR-review observer may wake the privileged relay.',
+      'Verify the upstream workflow name, event type, conclusion, and single-PR association.');
+    return;
+  }
   if (isIssueComment && !event?.issue?.pull_request) {
     emit({ success: true, mutated: false, decisionCode: 'IGNORED_NON_PR_COMMENT',
       reason: 'This is an Issue comment, not a pull-request comment.', nextAction: 'No review-relay action is needed.' });
     return;
   }
-  const prNumber = Number(event?.pull_request?.number || (isIssueComment ? event?.issue?.number : 0));
+  const prNumber = Number(event?.pull_request?.number
+    || (isIssueComment ? event?.issue?.number : 0)
+    || (isTrustedObserverRun ? upstreamRun.pull_requests[0].number : 0));
   if (!Number.isInteger(prNumber) || prNumber < 1) {
     fail('BLOCK_PR_NUMBER_INVALID', 'The event does not identify a valid pull request number.',
       'Inspect the event type and payload; do not guess the target PR.');
@@ -128,8 +144,8 @@ async function run() {
   const commentEvent = event?.comment || null;
   const escalationRequested = isIssueComment
     && /^\s*(?:\[autoloop:escalate\]|@autoloop\s+escalate)\s*:?\s*[\s\S]+$/i.test(String(commentEvent?.body || ''));
-  const relayReviewRequested = isIssueComment
-    && /^\s*(?:\[autoloop:relay-review\]|@autoloop\s+relay-review)\s*$/i.test(String(commentEvent?.body || ''));
+  const relayReviewRequested = isTrustedObserverRun || (isIssueComment
+    && /^\s*(?:\[autoloop:relay-review\]|@autoloop\s+relay-review)\s*$/i.test(String(commentEvent?.body || '')));
   const commentActor = String(commentEvent?.user?.login || '');
   const trustedCommentActor = config.trustedReviewers.some(login => String(login).toLowerCase() === commentActor.toLowerCase());
 
@@ -139,7 +155,7 @@ async function run() {
   if (eventName === 'pull_request_review') {
     fail('BLOCK_UNTRUSTED_EVENT_ROUTE',
       'Privileged review relay cannot run directly on pull_request_review merge refs.',
-      'From the PR conversation, ask a configured trusted reviewer to post [autoloop:relay-review]. The secure workflow will re-read GitHub review evidence from default-branch code.',
+      'Let the no-secret observer finish, or ask a configured trusted reviewer to post [autoloop:relay-review]. The secure workflow will re-read GitHub review evidence from default-branch code.',
       { pullRequestNumber: prNumber, headSha: currentHead });
     return;
   }
@@ -151,7 +167,7 @@ async function run() {
     emit(report);
     return;
   }
-  if (relayReviewRequested && !trustedCommentActor) {
+  if (isIssueComment && relayReviewRequested && !trustedCommentActor) {
     emit({
       success: false, mutated: false, requiresWrite: false, decisionCode: 'IGNORED_UNTRUSTED_ACTOR',
       reason: 'Only configured trusted reviewers may request the secure review relay.',
