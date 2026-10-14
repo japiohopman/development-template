@@ -172,13 +172,36 @@ async function run() {
   let reviews = [];
   let checkRuns = [];
   let comments = [];
+  let decisionEventName = eventName;
+  let decisionEventAction = eventAction;
+  const isHeadSync = eventName === 'pull_request_target' && eventAction === 'synchronize';
   try {
-    const isHeadSync = eventName === 'pull_request_target' && eventAction === 'synchronize';
-    if (eventName === 'pull_request_review' || isHeadSync) {
+    if (relayReviewRequested || isHeadSync) {
       reviews = await fetchAllPages('/pulls/' + prNumber + '/reviews');
-      if (!reviews.some(item => String(item?.id) === String(reviewEvent?.id)) && reviewEvent) reviews.push(reviewEvent);
+      if (relayReviewRequested) {
+        const trustedReviews = reviews.filter(item =>
+          config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())
+          && ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(String(item?.state || '').toUpperCase()));
+        trustedReviews.sort((a, b) => {
+          const timeA = String(a?.submitted_at || a?.updated_at || a?.created_at || '');
+          const timeB = String(b?.submitted_at || b?.updated_at || b?.created_at || '');
+          return timeA.localeCompare(timeB) || (Number(a?.id) || 0) - (Number(b?.id) || 0);
+        });
+        reviewEvent = trustedReviews.at(-1) || null;
+        if (!reviewEvent) {
+          emit({
+            success: false, mutated: false, requiresWrite: false, decisionCode: 'WAITING_FOR_TRUSTED_REVIEW',
+            reason: 'No submitted review by a configured trusted reviewer is available to relay.',
+            nextAction: 'A configured trusted reviewer must submit a review on the current PR, then post [autoloop:relay-review].',
+            repositoryFullName: repositoryValue, pullRequestNumber: prNumber, headSha: currentHead
+          });
+          return;
+        }
+        decisionEventName = 'pull_request_review';
+        decisionEventAction = 'submitted';
+      }
     }
-    if (eventName === 'pull_request_review' || isHeadSync) {
+    if (relayReviewRequested || isHeadSync) {
       checkRuns = await fetchAllPages('/commits/' + encodeURIComponent(currentHead) + '/check-runs', 'check_runs');
     }
   } catch (error) {
@@ -189,7 +212,8 @@ async function run() {
 
   const governing = extractGoverningIssueNumber(pullRequest.body || '', repositoryValue);
   let decision = evaluateReviewRelay({
-    repositoryFullName: repositoryValue, pullRequest, eventName, eventAction, eventReview, eventComment: commentEvent,
+    repositoryFullName: repositoryValue, pullRequest, eventName: decisionEventName, eventAction: decisionEventAction,
+    eventReview: reviewEvent, eventComment: commentEvent,
     reviews, trustedReviewers: config.trustedReviewers, requiredChecks: config.requiredChecks, checkRuns,
     governingIssueNumber: governing.number
   });
@@ -358,8 +382,9 @@ async function run() {
     comments = await fetchAllPages('/issues/' + prNumber + '/comments');
     const keys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\s]+) -->/g)].map(match => match[1]));
     decision = evaluateReviewRelay({
-      repositoryFullName: repositoryValue, pullRequest, eventName, eventAction, eventReview, eventComment: commentEvent,
-      reviews, trustedReviewers: config.trustedReviewers, requiredChecks: config.requiredChecks, checkRuns,
+      repositoryFullName: repositoryValue, pullRequest, eventName: decisionEventName, eventAction: decisionEventAction,
+      eventReview, eventComment: commentEvent, reviews,
+      trustedReviewers: config.trustedReviewers, requiredChecks: config.requiredChecks, checkRuns,
       governingIssueNumber: governing.number, existingWork, existingEventKeys: keys
     });
   }
