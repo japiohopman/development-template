@@ -48,7 +48,7 @@ function mockSource(scenario) {
   ].join('\n');
 }
 
-function runRelay(t, scenario, commentActor = 'trusted-reviewer') {
+function runRelay(t, scenario, commentActor = 'trusted-reviewer', trigger = 'issue_comment') {
   const directory = mkdtempSync(join(tmpdir(), 'review-relay-runner-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const config = JSON.parse(readFileSync(join(templateRoot, 'config/autoloop.example.json'), 'utf8'));
@@ -58,15 +58,26 @@ function runRelay(t, scenario, commentActor = 'trusted-reviewer') {
   const configPath = join(directory, 'autoloop.json');
   const eventPath = join(directory, 'event.json');
   const preloadPath = join(directory, 'mock-fetch.mjs');
-  const event = {
-    action: 'created',
-    repository: { full_name: 'example/project' },
-    issue: { number: 17, pull_request: { url: 'https://api.github.com/repos/example/project/pulls/17' } },
-    comment: {
-      id: 901, user: { login: commentActor }, body: '[autoloop:relay-review]',
-      created_at: '2026-10-14T12:30:00Z'
-    }
-  };
+  const event = trigger === 'workflow_run'
+    ? {
+        action: 'completed',
+        repository: { full_name: 'example/project' },
+        workflow_run: {
+          name: 'Observe PR review event (unprivileged)',
+          event: 'pull_request_review',
+          conclusion: 'success',
+          pull_requests: [{ number: 17 }]
+        }
+      }
+    : {
+        action: 'created',
+        repository: { full_name: 'example/project' },
+        issue: { number: 17, pull_request: { url: 'https://api.github.com/repos/example/project/pulls/17' } },
+        comment: {
+          id: 901, user: { login: commentActor }, body: '[autoloop:relay-review]',
+          created_at: '2026-10-14T12:30:00Z'
+        }
+      };
   writeFileSync(configPath, JSON.stringify(config));
   writeFileSync(eventPath, JSON.stringify(event));
   writeFileSync(preloadPath, mockSource(scenario));
@@ -76,8 +87,8 @@ function runRelay(t, scenario, commentActor = 'trusted-reviewer') {
       ...process.env,
       GITHUB_REPOSITORY: 'example/project',
       GITHUB_TOKEN: 'mock-token-not-a-real-secret',
-      GITHUB_EVENT_NAME: 'issue_comment',
-      GITHUB_EVENT_ACTION: 'created',
+      GITHUB_EVENT_NAME: trigger,
+      GITHUB_EVENT_ACTION: trigger === 'workflow_run' ? 'completed' : 'created',
       GITHUB_EVENT_PATH: eventPath,
       AUTOLOOP_CONFIG_PATH: configPath,
       AUTOLOOP_STATE_BRANCH: 'autoloop-state'
@@ -97,6 +108,14 @@ test('trusted relay command re-reads current-head approval and exact-head requir
   assert.equal(result.report.decisionCheckName, 'Autoloop trusted review relay');
   assert.equal(result.report.checkConclusion, 'success');
   assert.equal(result.report.requiresWrite, false);
+});
+
+test('the secure workflow_run bridge automatically relays a review from the no-secret observer', t => {
+  const result = runRelay(t, 'approval', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
+  assert.equal(result.report.checkConclusion, 'success');
+  assert.equal(result.report.mutated, true);
 });
 
 test('relay updates its existing managed check run rather than creating duplicates', t => {
