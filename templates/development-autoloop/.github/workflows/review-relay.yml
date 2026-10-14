@@ -5,11 +5,15 @@ on:
     types: [opened, reopened, synchronize, edited, ready_for_review]
   issue_comment:
     types: [created, edited]
+  workflow_run:
+    workflows: ["Observe PR review event (unprivileged)"]
+    types: [completed]
 
 # Privileged relay events use trusted default-branch workflow code only.
-# Review submissions are re-read from GitHub after a trusted reviewer posts
-# [autoloop:relay-review]; this avoids giving secrets to PR-merge-ref workflows.
-# Repair handoffs are audit comments; this workflow never starts a provider task.
+# A separate no-secret workflow observes pull_request_review events, then this
+# workflow re-reads current reviews/checks from default-branch code on workflow_run.
+# A trusted [autoloop:relay-review] PR comment is a safe manual retry path.
+# This workflow never starts a provider task.
 permissions:
   contents: read
   issues: write
@@ -17,13 +21,13 @@ permissions:
   checks: write
 
 concurrency:
-  group: review-relay-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || 'unknown' }}
+  group: review-relay-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || 'unknown' }}
   cancel-in-progress: false
 
 jobs:
   review-relay:
     name: Evaluate trusted review and existing-work handoff
-    if: ${{ github.event.pull_request.number || github.event.issue.pull_request }}
+    if: ${{ github.event.pull_request.number || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0].number }}
     runs-on: ubuntu-latest
     environment: autoloop-dispatch
     timeout-minutes: 8
