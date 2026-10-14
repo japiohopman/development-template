@@ -97,6 +97,22 @@ function mockSource(scenario) {
     "        updatedAt: new Date().toISOString(),",
     "        metadata: {}",
     "      }];",
+    "    } else if (scenario === 'reclaimed-reconciled-claim') {",
+    "      claimsList = [{",
+    "        schemaVersion: 1,",
+    "        claimId: 'claim-1-999',",
+    "        repository: { owner: 'example', repo: 'project' },",
+    "        issueNumber: 1,",
+    "        owner: 'autoloop',",
+    "        provider: 'jules',",
+    "        sessionId: 's-123',",
+    "        createdAt: new Date(Date.now() - 7200000).toISOString(),",
+    "        expiresAt: new Date(Date.now() - 3600000).toISOString(),",
+    "        status: 'RECLAIMED',",
+    "        reconciliationStatus: 'RECONCILED',",
+    "        updatedAt: new Date().toISOString(),",
+    "        metadata: {}",
+    "      }];",
     "    }",
     "    const content = Buffer.from(JSON.stringify({ claims: claimsList })).toString('base64');",
     "    return reply({ encoding: 'base64', content });",
@@ -247,6 +263,15 @@ test('candidate with an expired unreconciled claim blocks selection', t => {
 
 test('candidate with a RELEASED + RECONCILED claim is not blocked', t => {
   const result = runRunner(t, 'released-reconciled-claim');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.success, true);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'CANDIDATE_SELECTED');
+  assert.equal(result.report.selectedCandidate.number, 1);
+});
+
+test('candidate with a RECLAIMED + RECONCILED claim is not blocked', t => {
+  const result = runRunner(t, 'reclaimed-reconciled-claim');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.report.success, true);
   assert.equal(result.report.mutated, false);
