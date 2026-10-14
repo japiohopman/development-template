@@ -88,15 +88,14 @@ export function extractSessionClaimId(session) {
 
 function issueIsLinkedToPullRequest(pullRequest, issueNumber) {
   const searchable = String(pullRequest?.title ?? '') + '\n' + String(pullRequest?.body ?? '');
-  return new RegExp('#' + issueNumber + '\\b').test(searchable)
-    || new RegExp('/issues/' + issueNumber + '(?:\\b|$)').test(searchable);
+  const explicitIssueReference = new RegExp(
+    '\\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|issue)\\s+#' + issueNumber + '\\b',
+    'i'
+  );
+  return explicitIssueReference.test(searchable)
+    || new RegExp('/issues/' + issueNumber + '(?:\\b|$)', 'i').test(searchable);
 }
 
-/**
- * Reconcile the target repository's complete Jules session inventory against its
- * read-only GitHub Issue/branch/PR adapters and durable claim ledger.
- * All adapters are mandatory. Missing evidence is a blocker, never an empty set.
- */
 function sessionPullRequestRefs(session) {
   if (session?.outputs !== undefined && session?.outputs !== null && !Array.isArray(session.outputs)) {
     return { invalid: true, refs: [] };
