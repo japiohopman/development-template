@@ -32,11 +32,9 @@ Manual or automated claim management must target exact claim IDs (`claimId`):
 - **No bulk deletion or silent abandonment:** claims must be preserved with full historical reconciliation audit records. Never execute bulk deletion commands on state stores.
 
 
-## Jules API key for manual read-only reconciliation
+## Jules API key for manual dispatch
 
-After installing the template into a consumer repository, configure a GitHub Actions repository secret named `JULES_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret** to use the manual `reconcile-readonly.yml` workflow. Restrict workflow access to the repository that needs it. Keep the value out of source files, logs, Issues, PRs, and test fixtures. CI and tests must use mocked provider requests and must not read this secret.
-
-The `reconcile-readonly.yml` workflow requires a manual `workflow_dispatch` run and exact repository-name confirmation. It has only `contents: read`, `issues: read`, and `pull-requests: read` permissions. It reads the `autoloop-state` branch by default; set the Actions variable `AUTOLOOP_STATE_BRANCH` if the consumer repository uses a different dedicated state branch. A missing/uninitialized branch or unreadable `claims.json` blocks the run instead of being interpreted as an empty claim ledger. The workflow performs no dispatch, provider session creation, GitHub writes, automatic merge, or scheduled heartbeat.
+Configure a GitHub Actions repository secret named `JULES_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**. Restrict workflow access to the repository that needs it. Keep the value out of source files, logs, Issues, PRs, and test fixtures. CI and tests must use mocked provider requests and must not read this secret.
 
 Do not enable live dispatch until the disposable-repository pilot and all definition-of-done checks are complete.
 
