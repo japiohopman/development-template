@@ -24,9 +24,13 @@ function mockSource(scenario) {
     "const issue = " + JSON.stringify(validIssue) + ";",
     "function reply(payload, status = 200) { return { ok: status >= 200 && status < 300, status, json: async () => payload }; }",
     "globalThis.fetch = async (input, options = {}) => {",
-    "  if (options.method && options.method !== 'GET') throw new Error('Only GET calls are allowed in this mock.');",
     "  const url = new URL(String(input));",
     "  const path = url.pathname;",
+    "  if (path.startsWith('/v1alpha/sessions')) {",
+    "    if (scenario === 'sessions-failure') return reply({ message: 'Provider Error' }, 500);",
+    "    return reply({ sessions: [] });",
+    "  }",
+    "  if (options.method && options.method !== 'GET') throw new Error('Only GET calls are allowed in this mock.');",
     "  if (path.startsWith('/repos/example/project/issues')) {",
     "    if (scenario === 'api-failure') return reply({ message: 'Internal Server Error' }, 500);",
     "    if (scenario === 'open-pr') return reply([issue, { number: 2, title: 'PR', pull_request: {} }]);",
@@ -39,11 +43,14 @@ function mockSource(scenario) {
     "    return reply([]);",
     "  }",
     "  if (path.startsWith('/repos/example/project/git/ref/heads/')) {",
+    "    if (scenario === 'missing-state-branch') return reply({ message: 'Not Found' }, 404);",
     "    return reply({ object: { sha: '1234567890123456789012345678901234567890' } });",
     "  }",
     "  if (path.startsWith('/repos/example/project/contents/claims.json')) {",
+    "    if (scenario === 'missing-claims-file') return reply({ message: 'Not Found' }, 404);",
+    "    let claimsList = [];",
     "    if (scenario === 'active-claim') {",
-    "      const claim = {",
+    "      claimsList = [{",
     "        schemaVersion: 1,",
     "        claimId: 'claim-1-123',",
     "        repository: { owner: 'example', repo: 'project' },",
@@ -57,12 +64,42 @@ function mockSource(scenario) {
     "        reconciliationStatus: 'PENDING',",
     "        updatedAt: new Date().toISOString(),",
     "        metadata: {}",
-    "      };",
-    "      const content = Buffer.from(JSON.stringify({ claims: [claim] })).toString('base64');",
-    "      return reply({ encoding: 'base64', content });",
+    "      }];",
+    "    } else if (scenario === 'expired-unreconciled-claim') {",
+    "      claimsList = [{",
+    "        schemaVersion: 1,",
+    "        claimId: 'claim-1-456',",
+    "        repository: { owner: 'example', repo: 'project' },",
+    "        issueNumber: 1,",
+    "        owner: 'autoloop',",
+    "        provider: 'jules',",
+    "        sessionId: null,",
+    "        createdAt: new Date(Date.now() - 7200000).toISOString(),",
+    "        expiresAt: new Date(Date.now() - 3600000).toISOString(),",
+    "        status: 'EXPIRED',",
+    "        reconciliationStatus: 'PENDING',",
+    "        updatedAt: new Date(Date.now() - 3600000).toISOString(),",
+    "        metadata: {}",
+    "      }];",
+    "    } else if (scenario === 'released-reconciled-claim') {",
+    "      claimsList = [{",
+    "        schemaVersion: 1,",
+    "        claimId: 'claim-1-789',",
+    "        repository: { owner: 'example', repo: 'project' },",
+    "        issueNumber: 1,",
+    "        owner: 'autoloop',",
+    "        provider: 'jules',",
+    "        sessionId: 's-123',",
+    "        createdAt: new Date(Date.now() - 7200000).toISOString(),",
+    "        expiresAt: new Date(Date.now() - 3600000).toISOString(),",
+    "        status: 'RELEASED',",
+    "        reconciliationStatus: 'RECONCILED',",
+    "        updatedAt: new Date().toISOString(),",
+    "        metadata: {}",
+    "      }];",
     "    }",
-    "    const emptyContent = Buffer.from(JSON.stringify({ claims: [] })).toString('base64');",
-    "    return reply({ encoding: 'base64', content: emptyContent });",
+    "    const content = Buffer.from(JSON.stringify({ claims: claimsList })).toString('base64');",
+    "    return reply({ encoding: 'base64', content });",
     "  }",
     "  return reply({ message: 'not found' }, 404);",
     "};"
@@ -91,17 +128,24 @@ function runRunner(t, scenario, envOverrides = {}) {
 
   writeFileSync(preloadPath, mockSource(scenario));
 
+  const env = {
+    ...process.env,
+    GITHUB_REPOSITORY: 'example/project',
+    GITHUB_TOKEN: 'mock-token-not-a-real-secret',
+    CONFIRM_REPOSITORY: 'example/project',
+    JULES_API_KEY: 'mock-jules-key-not-a-real-secret',
+    AUTOLOOP_CONFIG_PATH: configPath,
+    ...envOverrides
+  };
+
+  if (envOverrides.JULES_API_KEY === null) {
+    delete env.JULES_API_KEY;
+  }
+
   const result = spawnSync(process.execPath, ['--import', preloadPath, 'scripts/autoloop-runner.mjs'], {
     cwd: templateRoot,
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      GITHUB_REPOSITORY: 'example/project',
-      GITHUB_TOKEN: 'mock-token-not-a-real-secret',
-      CONFIRM_REPOSITORY: 'example/project',
-      AUTOLOOP_CONFIG_PATH: configPath,
-      ...envOverrides
-    }
+    env
   });
 
   return { ...result, report: readReport(result.stdout) };
@@ -133,6 +177,42 @@ test('an API failure during snapshot collection blocks closed with BLOCK_INCOMPL
   assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
 });
 
+test('missing state branch fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
+  const result = runRunner(t, 'missing-state-branch');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /autoloop-state|Claim state branch/i);
+});
+
+test('missing claims.json on state branch fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
+  const result = runRunner(t, 'missing-claims-file');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /claims\.json/i);
+});
+
+test('absent JULES_API_KEY fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
+  const result = runRunner(t, 'pass', { JULES_API_KEY: null });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /JULES_API_KEY/i);
+});
+
+test('provider session list failure fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {
+  const result = runRunner(t, 'sessions-failure');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /Jules API|provider sessions/i);
+});
+
 test('invalid configuration blocks before candidate selection', t => {
   const result = runRunner(t, 'invalid-config');
   assert.notEqual(result.status, 0);
@@ -155,4 +235,21 @@ test('candidate with an active claim blocks selection', t => {
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
   assert.equal(result.report.decisionCode, 'BLOCK_ACTIVE_CLAIM');
+});
+
+test('candidate with an expired unreconciled claim blocks selection', t => {
+  const result = runRunner(t, 'expired-unreconciled-claim');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_ACTIVE_CLAIM');
+});
+
+test('candidate with a RELEASED + RECONCILED claim is not blocked', t => {
+  const result = runRunner(t, 'released-reconciled-claim');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.success, true);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'CANDIDATE_SELECTED');
+  assert.equal(result.report.selectedCandidate.number, 1);
 });

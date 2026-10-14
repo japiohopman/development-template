@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { validateConfig } from '../src/config.mjs';
-import { normalizeRepositoryIdentity } from '../src/claims.mjs';
+import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.mjs';
 import { selectCandidateIssue } from '../src/selection.mjs';
 import { JulesClient } from '../src/jules.mjs';
 
@@ -144,39 +144,35 @@ async function run() {
 
     const issues = rawIssuesAndPRs.filter(item => !item.pull_request);
 
-    let claims = [];
-    try {
-      const ref = await api('/repos/' + repo.owner + '/' + repo.repo + '/git/ref/heads/' + encodeURIComponent(stateBranch));
-      const headSha = ref?.object?.sha;
-      if (typeof headSha !== 'string' || !headSha.trim()) {
-        throw new Error('Claim state branch ref returned no commit SHA.');
-      }
-      const file = await api('/repos/' + repo.owner + '/' + repo.repo + '/contents/claims.json?ref=' + encodeURIComponent(headSha));
-      if (file?.encoding !== 'base64' || typeof file.content !== 'string') {
-        throw new Error('Claim state file claims.json is missing or not base64 encoded.');
-      }
-      const parsedClaimsFile = JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
-      if (!parsedClaimsFile || typeof parsedClaimsFile !== 'object' || !Array.isArray(parsedClaimsFile.claims)) {
-        throw new Error('Claim state file claims.json must contain a claims array.');
-      }
-      claims = parsedClaimsFile.claims;
-    } catch (claimErr) {
-      if (claimErr?.status === 404) {
-        claims = [];
-      } else {
-        throw new Error('Failed to read authoritative claim state from branch ' + stateBranch + ': ' + (claimErr?.message || String(claimErr)));
+    const ref = await api('/repos/' + repo.owner + '/' + repo.repo + '/git/ref/heads/' + encodeURIComponent(stateBranch));
+    const headSha = ref?.object?.sha;
+    if (typeof headSha !== 'string' || !headSha.trim()) {
+      throw new Error('Claim state branch ' + stateBranch + ' returned no commit SHA.');
+    }
+    const file = await api('/repos/' + repo.owner + '/' + repo.repo + '/contents/claims.json?ref=' + encodeURIComponent(headSha));
+    if (file?.encoding !== 'base64' || typeof file.content !== 'string') {
+      throw new Error('Claim state file claims.json is missing or not base64 encoded on branch ' + stateBranch + '.');
+    }
+    const parsedClaimsFile = JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
+    if (!parsedClaimsFile || typeof parsedClaimsFile !== 'object' || !Array.isArray(parsedClaimsFile.claims)) {
+      throw new Error('Claim state file claims.json must contain a claims array.');
+    }
+    for (const c of parsedClaimsFile.claims) {
+      const check = validateClaimRecord(c);
+      if (!check.valid) {
+        throw new Error('Claim state file claims.json contains a malformed claim record (' + (c?.claimId ?? 'unknown') + ').');
       }
     }
+    const claims = parsedClaimsFile.claims.map(c => ({
+      ...c,
+      reconciled: c.reconciliationStatus === 'RECONCILED'
+    }));
 
-    let sessions = [];
-    if (julesApiKey) {
-      try {
-        const providerClient = new JulesClient({ apiKey: julesApiKey });
-        sessions = await providerClient.listSessions();
-      } catch (sessionErr) {
-        throw new Error('Failed to fetch provider sessions from Jules API: ' + (sessionErr?.message || String(sessionErr)));
-      }
+    if (!julesApiKey) {
+      throw new Error('JULES_API_KEY environment variable is required to collect provider session inventory.');
     }
+    const providerClient = new JulesClient({ apiKey: julesApiKey });
+    const sessions = await providerClient.listSessions();
 
     snapshot = {
       snapshotComplete: true,
