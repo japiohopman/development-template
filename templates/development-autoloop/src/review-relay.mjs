@@ -38,7 +38,7 @@ export function makeReviewEventKey({ repositoryFullName, pullRequestNumber, head
   const repository = lower(repositoryFullName);
   const head = lower(headSha);
   if (!validRepository(repository) || !Number.isInteger(Number(pullRequestNumber)) || Number(pullRequestNumber) < 1 || !SHA1_PATTERN.test(head)) return null;
-  const review = safeIdentifier(reviewId);
+  const review = safeIdentifier(String(reviewId ?? ''));
   const version = safeIdentifier(updatedAt) || safeIdentifier(state);
   if (!review || !version) return null;
   return 'review-relay:v1:' + repository + ':pr:' + Number(pullRequestNumber) + ':head:' + head + ':review:' + review + ':version:' + version;
