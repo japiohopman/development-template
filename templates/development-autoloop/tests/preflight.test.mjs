@@ -221,3 +221,33 @@ test('PR URL on a different Git host blocks even when owner and repository path 
   assert.equal(blockers.length, 1);
   assert.match(blockers[0].reason, /does not belong/);
 });
+
+test('multiple active/unresolved sessions produce structured blockers for each session', async () => {
+  const blockers = await reconcileSessions([
+    {
+      name: 'sessions/101',
+      state: 'PAUSED',
+      sourceContext: { source: 'source-a' },
+    },
+    {
+      name: 'sessions/102',
+      state: 'IN_PROGRESS',
+      sourceContext: { source: 'source-a' },
+      outputs: [{ pullRequest: { url: 'https://github.com/example/project/pull/20' } }],
+    },
+  ], {
+    sourceName: 'source-a',
+    repositoryUrl: 'https://github.com/example/project',
+    fetchPullRequest: async (num) => {
+      if (num === 20) return { state: 'open', merged: false };
+      return null;
+    },
+  });
+
+  assert.equal(blockers.length, 2);
+  assert.equal(blockers[0].session, 'sessions/101');
+  assert.equal(blockers[0].state, 'PAUSED');
+  assert.equal(blockers[1].session, 'sessions/102');
+  assert.equal(blockers[1].pullRequest, 20);
+  assert.match(blockers[1].reason, /not merged/);
+});

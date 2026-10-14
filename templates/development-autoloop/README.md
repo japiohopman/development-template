@@ -4,7 +4,7 @@ A reusable set of building blocks for a careful Issue → coding agent → pull 
 
 **Status: Foundation — not ready to run tasks automatically.**
 
-In plain language: some important parts have been built and tested, including the Jules adapter. But those parts are not yet connected to a working GitHub Actions workflow that chooses an Issue, gathers the latest GitHub information, and starts Jules. There is **no working dispatch button in Actions yet**.
+In plain language: some important parts have been built and tested, including the Jules adapter. But those parts are not yet connected to a working GitHub Actions workflow that chooses an Issue, gathers the latest GitHub information, and starts Jules. There is **no automatic task dispatcher in Actions yet**. A separate manual, read-only reconciliation workflow is included for consumer repositories after the template is installed.
 
 ## What you will see in GitHub Actions
 
@@ -28,7 +28,7 @@ Some tests pretend to be the Jules service by returning made-up test responses. 
 
 A green check means only this: **the syntax checks and automated tests passed on the exact commit being checked.** It does not mean that Jules was given work, a PR was reviewed, or the entire loop was tested from start to finish.
 
-The file `.github/workflows/ci.yml` inside this template folder is an example workflow that travels with the template. GitHub does not run that nested file as a workflow in this catalog repository; the active checker is the root workflow linked above.
+The files inside `.github/workflows/` in this template folder are examples that travel with the template. GitHub does not run those nested files in this catalog repository; the active checker here is the root workflow linked above. After copying the template into a consumer repository, `reconcile-readonly.yml` provides a **manual, read-only** inventory check; it does not dispatch Jules or change GitHub state.
 
 ## What has been built so far?
 
@@ -39,7 +39,7 @@ The file `.github/workflows/ci.yml` inside this template folder is an example wo
 | Issue selection | Choose one safe next Issue from a complete set of GitHub information. If the choice is unclear, stop instead of guessing. | Built and tested; decision logic only |
 | Durable claim | Put a reservation on the Issue so a second run does not start the same work at the same time. | Built and tested |
 | Jules adapter and dispatch code | The code knows how to validate a task, find the right Jules source, request a session, and handle uncertain responses carefully. | Code exists; no Actions runner calls it yet |
-| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Next milestone |
+| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Built and tested; review-gated |
 | PR contract gate | Check that a PR has the required information and evidence for its exact latest commit. | Not built yet |
 | Review relay | Turn a trusted review into a safe next step, and send requested fixes back to the existing work instead of starting duplicates. | Not built yet |
 | Full loop and pilot | Test the whole process in a separate, disposable repository before relying on it. | Not built yet |
@@ -70,11 +70,11 @@ These commands do not dispatch work to Jules.
 
 **You do not need to add a Jules API key for the current validation workflow.**
 
-The code contains a Jules adapter, but no active GitHub Actions workflow calls the dispatch function yet. Do not add `JULES_API_KEY` just because you see it mentioned in the code or the roadmap. When the actual dispatch workflow is ready, its documentation must name the exact secret and, if used, the GitHub Environment where it belongs.
+The template's automated validation tests do not need a Jules API key. The separate manual `reconcile-readonly.yml` workflow does require a repository Actions secret named `JULES_API_KEY` after you install the template into a consumer repository, because it reads the provider's session inventory. It has read-only GitHub permissions and does not dispatch or create sessions. The actual dispatch workflow is still not connected.
 
 GitHub provides `GITHUB_TOKEN` to Actions automatically. Its permissions still need to be kept as small as possible. Secrets must never be committed to configuration files, source code, test fixtures, Issues, PR comments, or logs.
 
-Secrets and Environment settings do not copy over automatically when a repository is created from a template. They must be configured separately in a project that actually needs them.
+The read-only reconciliation workflow also reads the claim ledger from the `autoloop-state` branch by default. Set the Actions repository variable `AUTOLOOP_STATE_BRANCH` only if your consumer repository uses a different dedicated state branch. Missing/uninitialized state is a blocker, never an empty ledger. Secrets and Environment settings do not copy over automatically when a repository is created from a template; configure them separately in a project that actually needs them.
 
 ## Safety rules
 
