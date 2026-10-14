@@ -117,7 +117,7 @@ test('only explicit escalation from a trusted reviewer is recorded', () => {
   });
   assert.equal(trustedResult.decisionCode, 'ESCALATION_RECORDED');
   assert.match(trustedResult.commentBody, /Need a person to decide/);
-  assert.doesNotMatch(trustedResult.commentBody, /DISPATCHED/i);
+  assert.match(trustedResult.commentBody, /No repair task is dispatched/i);
 });
 
 test('generic comments and emoji acknowledgements cannot advance the lifecycle', () => {
