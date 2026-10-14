@@ -32,7 +32,7 @@ A source file by itself is not an automated loop. Its runner must be called by t
 - Configuration validation, Issue/PR contracts, preflight, selection, durable claims, provider dispatch logic, and lifecycle reconciliation have tested implementations.
 - The read-only reconciliation workflow is an example for a consuming repository and must be invoked manually.
 - The PR contract gate and its read-only consumer workflow are implemented in the Issue #7 change; they remain review-gated until the exact commit has passed CI and the implementation is independently reviewed.
-- The automatic dispatcher is not yet connected to an active Actions runner.
+- The automatic dispatcher is not yet connected to an active Actions runner; this missing connection is tracked explicitly in [Issue #19](https://github.com/japiohopman/development-template/issues/19).
 - The trusted review relay and full end-to-end pilot are still outstanding.
 
 This is Foundation, not production-ready unattended automation. Live or scheduled dispatch must remain disabled.

@@ -8,7 +8,7 @@ Development Autoloop is a reusable GitHub workflow for managing development task
 
 The workflow is the coordinator. Code under src/ contains reusable decisions, code under scripts/ reads live data and calls those decisions, and workflows under .github/workflows/ decide when steps run and which permissions are available.
 
-**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The full automatic dispatcher and trusted review relay are not connected end to end, and the disposable consumer-repository pilot remains outstanding.
+**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is a separate unfinished milestone in [Issue #19](https://github.com/japiohopman/development-template/issues/19). The trusted review relay is not connected end to end, and the disposable consumer-repository pilot remains outstanding.
 
 ## A simple way to understand the parts
 

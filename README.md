@@ -50,7 +50,7 @@ Workflow files stored under templates/development-autoloop/.github/workflows/ ar
 
 ## Current state and next steps
 
-The template has tested logic for configuration, contracts, selection, durable claims, provider dispatch, and session/Issue/branch/PR reconciliation. The PR contract gate is being added as its own read-only gate. The full dispatcher is not yet connected to an active Actions runner, and the trusted review relay plus a complete disposable-repository pilot remain future work.
+The template has tested logic for configuration, contracts, selection, durable claims, provider dispatch, and session/Issue/branch/PR reconciliation. The PR contract gate is being added as its own read-only gate. The missing connection from Issue discovery and preflight into a real Actions dispatcher is now explicitly tracked as [Issue #19](https://github.com/japiohopman/development-template/issues/19). The trusted review relay and complete disposable-repository pilot remain future work.
 
 Follow the template's [architecture](templates/development-autoloop/docs/ARCHITECTURE.md), [implementation plan](templates/development-autoloop/docs/IMPLEMENTATION_PLAN.md), [recovery notes](templates/development-autoloop/docs/RECOVERY.md), and [template standards](docs/TEMPLATE_STANDARDS.md).
 
