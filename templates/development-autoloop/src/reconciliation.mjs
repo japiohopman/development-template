@@ -97,6 +97,23 @@ function issueIsLinkedToPullRequest(pullRequest, issueNumber) {
  * read-only GitHub Issue/branch/PR adapters and durable claim ledger.
  * All adapters are mandatory. Missing evidence is a blocker, never an empty set.
  */
+function sessionPullRequestRefs(session) {
+  if (session?.outputs !== undefined && session?.outputs !== null && !Array.isArray(session.outputs)) {
+    return { invalid: true, refs: [] };
+  }
+  const outputs = Array.isArray(session?.outputs) ? session.outputs : [];
+  const refs = [];
+  for (const output of outputs) {
+    if (!output || typeof output !== 'object' || !Object.prototype.hasOwnProperty.call(output, 'pullRequest')) continue;
+    const ref = output.pullRequest;
+    if (!ref || typeof ref.url !== 'string' || !ref.url.trim()) {
+      return { invalid: true, refs: [] };
+    }
+    refs.push(ref);
+  }
+  return { invalid: false, refs };
+}
+
 export async function reconcileSessionLifecycle({
   config = null,
   repository,
