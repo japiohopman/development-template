@@ -228,7 +228,7 @@ async function run() {
     // This keeps a replay idempotent even after the original task is reconciled.
     try {
       comments = await fetchAllPages('/issues/' + prNumber + '/comments');
-      const priorKeys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\\s]+) -->/g)].map(match => match[1]));
+      const priorKeys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\s]+) -->/g)].map(match => match[1]));
       if (decision.eventKey && priorKeys.includes(decision.eventKey)) {
         emit({ ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
           commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' });
