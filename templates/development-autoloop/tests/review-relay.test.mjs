@@ -149,7 +149,7 @@ test('a repaired PR needs explicit addressed and remaining findings before appro
   assert.equal(blocked.decisionCode, 'BLOCK_REPAIR_DISPOSITION_MISSING');
 
   const newApproval = review(812, 'trusted-reviewer', 'APPROVED', head, '2026-10-14T12:04:00Z',
-    'Findings addressed: Updated the contract validation and added regression coverage.\\nFindings remaining: None.');
+    'Findings addressed: Updated the contract validation and added regression coverage.\nFindings remaining: None.');
   const approved = evaluate({ eventReview: newApproval, reviews: [previousRequest, newApproval] });
   assert.equal(approved.decisionCode, 'APPROVED_CURRENT_HEAD');
   assert.equal(approved.repairDisposition.findingsRemaining, 'None.');
