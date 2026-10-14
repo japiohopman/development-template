@@ -18,7 +18,7 @@ test('review relay checks out trusted default-branch code and uses the protected
   assert.match(workflow, /persist-credentials:\s*false/);
 });
 
-test('review relay permissions are minimal except for its one auditable PR comment', () => {
+test('review relay permissions are minimal for its managed per-head check and audit comments', () => {
   const permissions = workflow.match(/^permissions:\n([\s\S]*?)\n\nconcurrency:/m)?.[1] || '';
   assert.match(permissions, /contents:\s*read/);
   assert.match(permissions, /issues:\s*write/);
