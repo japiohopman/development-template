@@ -5,9 +5,9 @@ import { readFile } from 'node:fs/promises';
 const workflow = await readFile(new URL('../.github/workflows/review-relay.yml', import.meta.url), 'utf8');
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 
-test('review relay listens to PR, review, and comment events but not a schedule', () => {
+test('privileged review relay listens to trusted PR-target and comment events, not review merge-ref events or schedules', () => {
   assert.match(workflow, /^  pull_request_target:/m);
-  assert.match(workflow, /^  pull_request_review:/m);
+  assert.doesNotMatch(workflow, /^  pull_request_review:/m);
   assert.match(workflow, /^  issue_comment:/m);
   assert.doesNotMatch(workflow, /^\s+(schedule|push):/m);
 });
