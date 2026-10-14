@@ -23,7 +23,7 @@ test('review relay permissions are minimal except for its one auditable PR comme
   assert.match(permissions, /contents:\s*read/);
   assert.match(permissions, /issues:\s*write/);
   assert.match(permissions, /pull-requests:\s*read/);
-  assert.match(permissions, /checks:\s*read/);
+  assert.match(permissions, /checks:\s*write/);
   assert.doesNotMatch(permissions, /contents:\s*write|pull-requests:\s*write/);
   assert.match(workflow, /review-relay\.mjs/);
   assert.doesNotMatch(workflow, /autoloop-runner\.mjs|dispatch\.mjs/);
