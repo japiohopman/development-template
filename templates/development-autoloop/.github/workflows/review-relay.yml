@@ -3,14 +3,13 @@ name: Trusted review relay (guarded, no dispatch)
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, edited, ready_for_review]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
   issue_comment:
     types: [created, edited]
 
-# The relay handles metadata only. It checks out the default branch and never
-# executes code from the pull-request head. Repair handoffs are audit comments
-# bound to a verified existing task; this workflow never starts a provider task.
+# Privileged relay events use trusted default-branch workflow code only.
+# Review submissions are re-read from GitHub after a trusted reviewer posts
+# [autoloop:relay-review]; this avoids giving secrets to PR-merge-ref workflows.
+# Repair handoffs are audit comments; this workflow never starts a provider task.
 permissions:
   contents: read
   issues: write
