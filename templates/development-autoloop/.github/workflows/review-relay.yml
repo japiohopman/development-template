@@ -1,0 +1,56 @@
+name: Trusted review relay (guarded, no dispatch)
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited]
+
+# The relay handles metadata only. It checks out the default branch and never
+# executes code from the pull-request head. Repair handoffs are audit comments
+# bound to a verified existing task; this workflow never starts a provider task.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: review-relay-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || 'unknown' }}
+  cancel-in-progress: false
+
+jobs:
+  review-relay:
+    name: Evaluate trusted review and existing-work handoff
+    if: ${{ github.event.pull_request.number || github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    environment: autoloop-dispatch
+    timeout-minutes: 8
+    steps:
+      - name: Verify default-branch event context
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          echo "::error::Review relay only runs trusted default-branch workflow code."
+          exit 1
+      - name: Check out trusted default-branch code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run guarded review relay
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+          AUTOLOOP_STATE_BRANCH: ${{ vars.AUTOLOOP_STATE_BRANCH || 'autoloop-state' }}
+          AUTOLOOP_CONFIG_PATH: config/autoloop.json
+        run: node scripts/review-relay.mjs
