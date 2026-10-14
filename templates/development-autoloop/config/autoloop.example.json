@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "enabled": false,
+  "repairDispatchEnabled": false,
   "defaultBranch": "main",
   "runMode": "dry-run",
   "workProvider": "none",
