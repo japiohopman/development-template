@@ -44,7 +44,7 @@ The files inside `.github/workflows/` in this template folder are examples that 
 | Review relay | Turn a trusted review into a safe next step, and send requested fixes back to the existing work instead of starting duplicates. | Not built yet |
 | Full loop and pilot | Test the whole process in a separate, disposable repository before relying on it. | Not built yet |
 
-Follow the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the order of work. The key remaining milestones are [Issue #6: reconcile sessions and PRs](https://github.com/japiohopman/development-template/issues/6), [Issue #7: PR contract gate](https://github.com/japiohopman/development-template/issues/7), [Issue #8: review relay](https://github.com/japiohopman/development-template/issues/8), and [Issue #9: end-to-end tests and pilot](https://github.com/japiohopman/development-template/issues/9).
+Follow the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the order of work. The key remaining milestones are [Issue #7: PR contract gate](https://github.com/japiohopman/development-template/issues/7), [Issue #8: review relay](https://github.com/japiohopman/development-template/issues/8), and [Issue #9: end-to-end tests and pilot](https://github.com/japiohopman/development-template/issues/9).
 
 ## A few words explained
 
