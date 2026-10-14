@@ -174,6 +174,46 @@ async function run() {
     governingIssueNumber: governing.number
   });
 
+  // If this approval follows a trusted changes-requested review, require a
+  // substantive change and return exact-head paths/checks plus explicit disposition.
+  if (decision.decisionCode === 'APPROVED_CURRENT_HEAD' && decision.repairDisposition) {
+    try {
+      const changedFiles = await fetchAllPages('/pulls/' + prNumber + '/files');
+      const headCommit = await api('/commits/' + encodeURIComponent(currentHead));
+      const parentSha = headCommit?.parents?.[0]?.sha;
+      if (!isSha(parentSha) || !isSha(headCommit?.commit?.tree?.sha)) throw new Error('Current head tree or parent SHA is unavailable.');
+      const parentCommit = await api('/commits/' + encodeURIComponent(parentSha));
+      const treeChanged = isSha(parentCommit?.commit?.tree?.sha) && parentCommit.commit.tree.sha !== headCommit.commit.tree.sha;
+      if (!treeChanged || changedFiles.length === 0) throw new Error('The repair head has no verifiable non-no-op file-tree change.');
+      const priorFindings = reviews
+        .filter(item => String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+          && String(item?.commit_id || '').toLowerCase() !== currentHead.toLowerCase()
+          && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase()))
+        .map(item => ({ reviewId: item.id ?? null, reviewer: item.user?.login ?? null,
+          reviewedHeadSha: item.commit_id ?? null, body: String(item.body || '').slice(0, 1200) }));
+      decision = {
+        ...decision,
+        repairEvidence: {
+          currentHeadSha: currentHead,
+          changedPaths: changedFiles.map(item => item?.filename).filter(value => typeof value === 'string').sort(),
+          checkEvidence: decision.checkEvidence,
+          previousHeadTreeChanged: true,
+          findingsAddressed: decision.repairDisposition.findingsAddressed,
+          findingsRemaining: decision.repairDisposition.findingsRemaining,
+          priorTrustedFindings: priorFindings,
+          status: 'REPAIR_EVIDENCE_VERIFIED_CURRENT_HEAD'
+        }
+      };
+    } catch {
+      decision = {
+        ...decision, success: false, decisionCode: 'BLOCK_REPAIR_EVIDENCE_UNAVAILABLE',
+        reason: 'The reviewer approved this head, but changed paths, parent-tree evidence, or prior trusted findings could not be verified.',
+        nextAction: 'Retry read-only repair-evidence collection. Do not treat the repair as satisfied until the exact-head evidence is complete.',
+        repairEvidence: null
+      };
+    }
+  }
+
   // A pushed repair is evidence, not approval. Report current-head paths/checks
   // and prior trusted findings; the new SHA still requires an explicit review.
   if (eventName === 'pull_request_target' && eventAction === 'synchronize') {
