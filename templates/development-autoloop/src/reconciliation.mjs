@@ -279,11 +279,11 @@ export async function reconcileSessionLifecycle({
     }
 
     const sessionSource = session.sourceContext?.source ?? session.source?.name ?? session.source ?? null;
-    if (!sessionSource) {
+    if (typeof sessionSource !== 'string' || !sessionSource.trim() || sessionSource !== sessionSource.trim()) {
       blockers.push({
         session: session.name ?? session.id ?? 'unknown',
         code: 'BLOCK_MISSING_SESSION_SOURCE',
-        reason: 'Session source metadata is missing; this session cannot be safely assigned to a repository.'
+        reason: 'Session source metadata is missing or malformed; this session cannot be safely assigned to a repository.'
       });
       continue;
     }
