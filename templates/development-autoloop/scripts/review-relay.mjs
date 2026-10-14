@@ -193,17 +193,10 @@ async function run() {
           return timeA.localeCompare(timeB) || (Number(a?.id) || 0) - (Number(b?.id) || 0);
         });
         reviewEvent = eligibleReviews.at(-1) || null;
-        if (!reviewEvent) {
-          emit({
-            success: false, mutated: false, requiresWrite: false, decisionCode: 'WAITING_FOR_TRUSTED_REVIEW',
-            reason: 'No submitted review by a configured trusted reviewer is available to relay.',
-            nextAction: 'A configured trusted reviewer must submit a review on the current PR, then post [autoloop:relay-review].',
-            repositoryFullName: repositoryValue, pullRequestNumber: prNumber, headSha: currentHead
-          });
-          return;
+        if (reviewEvent) {
+          decisionEventName = 'pull_request_review';
+          decisionEventAction = 'submitted';
         }
-        decisionEventName = 'pull_request_review';
-        decisionEventAction = 'submitted';
       }
     }
     if (relayReviewRequested || isHeadSync) {
@@ -231,7 +224,7 @@ async function run() {
       .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0];
     const neutralOutcomes = new Set([
       'ACKNOWLEDGEMENT_IGNORED', 'IGNORED_UNTRUSTED_ACTOR', 'IGNORED_UNTRUSTED_REVIEWER',
-      'IGNORED_UNSUPPORTED_EVENT', 'IGNORED_NON_VERDICT_REVIEW', 'DUPLICATE_EVENT_IGNORED'
+      'IGNORED_UNSUPPORTED_EVENT', 'IGNORED_NON_VERDICT_REVIEW'
     ]);
     const conclusion = decision.decisionCode === 'APPROVED_CURRENT_HEAD'
       ? 'success'
@@ -258,6 +251,23 @@ async function run() {
     });
     return { ...decision, mutated: true, decisionCheckRunId: created.id ?? null, decisionCheckName: checkName, checkConclusion: conclusion };
   };
+
+  if (relayReviewRequested && !reviewEvent) {
+    const waiting = {
+      success: false, mutated: false, requiresWrite: false, decisionCode: 'WAITING_FOR_TRUSTED_REVIEW',
+      reason: 'No submitted review by a configured trusted reviewer is available to relay.',
+      nextAction: 'A configured trusted reviewer must submit a review on the current PR, then post [autoloop:relay-review].',
+      repositoryFullName: repositoryValue, pullRequestNumber: prNumber, headSha: currentHead
+    };
+    try {
+      const recorded = await publishDecisionCheck(waiting);
+      emit(recorded);
+    } catch {
+      fail('BLOCK_RELAY_CHECK_WRITE_FAILED', 'No trusted review was found and GitHub could not record this blocked state.',
+        'Inspect the current PR head and check-run permissions before retrying.', { pullRequestNumber: prNumber, headSha: currentHead });
+    }
+    return;
+  }
 
   const governing = extractGoverningIssueNumber(pullRequest.body || '', repositoryValue);
   let decision = evaluateReviewRelay({
@@ -352,19 +362,28 @@ async function run() {
         repairEvidence: null
       };
     }
+    try {
+      decision = await publishDecisionCheck(decision);
+    } catch {
+      fail('BLOCK_RELAY_CHECK_WRITE_FAILED', 'The repair evidence was gathered but GitHub could not update the exact-head relay check.',
+        'Inspect the check-run API response and current PR head. The previous approval remains invalidated.',
+        { pullRequestNumber: prNumber, headSha: currentHead });
+      return;
+    }
     emit(decision);
     return;
   }
 
-  if (decision.decisionCode === 'BLOCK_REPAIR_CONTEXT_MISSING' && governing.number) {
+  if (decision.decisionCode === 'BLOCK_REPAIR_CONTEXT_MISSING' && governing.number)
     // Check the durable comment marker before requiring live provider context.
     // This keeps a replay idempotent even after the original task is reconciled.
     try {
       comments = await fetchAllPages('/issues/' + prNumber + '/comments');
       const priorKeys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\s]+) -->/g)].map(match => match[1]));
       if (decision.eventKey && priorKeys.includes(decision.eventKey)) {
-        emit({ ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
-          commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' });
+        const duplicate = { ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
+          commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' };
+        emit(await publishDecisionCheck(duplicate));
         return;
       }
     } catch {
@@ -450,14 +469,17 @@ async function run() {
       return;
     }
     if (existingKeys.includes(decision.eventKey)) {
-      emit({ ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
-        commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' });
+      const duplicate = { ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
+        commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' };
+      emit(await publishDecisionCheck(duplicate));
       return;
     }
     try {
       await api('/issues/' + prNumber + '/comments', 'POST', { body: decision.commentBody });
-      emit({ ...decision, mutated: true, requiresWrite: false, commentBody: null,
+      const recorded = await publishDecisionCheck({ ...decision,
         reason: decision.reason + ' A deduplicated audit comment was added to the existing PR; no task was dispatched.' });
+      emit({ ...recorded, mutated: true, requiresWrite: false, commentBody: null,
+        reason: decision.reason + ' A deduplicated audit comment and current-head relay check were recorded; no task was dispatched.' });
     } catch (error) {
       fail('BLOCK_AUDIT_COMMENT_WRITE_FAILED',
         'GitHub could not confirm the audit handoff comment was created (' + (error?.status ? 'HTTP ' + error.status : 'write outcome uncertain') + ').',
