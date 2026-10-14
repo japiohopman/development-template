@@ -39,7 +39,7 @@ The file `.github/workflows/ci.yml` inside this template folder is an example wo
 | Issue selection | Choose one safe next Issue from a complete set of GitHub information. If the choice is unclear, stop instead of guessing. | Built and tested; decision logic only |
 | Durable claim | Put a reservation on the Issue so a second run does not start the same work at the same time. | Built and tested |
 | Jules adapter and dispatch code | The code knows how to validate a task, find the right Jules source, request a session, and handle uncertain responses carefully. | Code exists; no Actions runner calls it yet |
-| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Built and tested |
+| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Built and tested; review-gated |
 | PR contract gate | Check that a PR has the required information and evidence for its exact latest commit. | Not built yet |
 | Review relay | Turn a trusted review into a safe next step, and send requested fixes back to the existing work instead of starting duplicates. | Not built yet |
 | Full loop and pilot | Test the whole process in a separate, disposable repository before relying on it. | Not built yet |
