@@ -1,23 +1,37 @@
 # Implementation plan
 
-Do not enable unattended live automation before steps 1–8 are complete and the disposable-repository pilot passes.
+Do not enable unattended live automation before the ordered milestones and the disposable-repository pilot pass.
 
 ## Ordered milestones
-1. **Contracts and config validation.** *(Complete)* Define issue/PR schemas, state model, required sections, repository settings, and configuration validator.
-2. **Pure preflight and selection.** *(Complete)* Test issue eligibility, dependencies, open-PR duplication, unknown provider states, deterministic ordering, and per-repository concurrency.
-3. **Durable claims.** *(Complete)* [Issue #4](https://github.com/japiohopman/development-template/issues/4) / [PR #13](https://github.com/japiohopman/development-template/pull/13). Implement a stable claimId, owner, issue number, provider, session ID, creation time, expiry, reconciled status, and atomic compare-and-swap. Add race and crash tests.
-4. **Provider adapter.** *(Complete)* [Issue #5](https://github.com/japiohopman/development-template/issues/5) / [PR #14](https://github.com/japiohopman/development-template/pull/14). Require exact manual confirmation, a complete authoritative snapshot, authoritative Source identity and branch checks, a durable claim before create, and validated lifecycle metadata. Ambiguous outcomes may trigger read-only reconciliation only; if unresolved, retain the block and never automatically retry session creation.
-5. **Session/PR loop.** *(Implemented; review-gated)* [Issue #6](https://github.com/japiohopman/development-template/issues/6). Reconcile actual sessions, issues, branches, claims, and PRs; fail closed on inconsistent states and missing metadata. The consumer-template `reconcile-readonly.yml` is manually triggered and read-only. No automatic or scheduled dispatcher is enabled.
-6. **PR contract gate.** Validate required sections, linked Issue, changed files, exact head SHA evidence, required checks, blockers, and no-op commits.
-7. **Review relay.** Consume trusted reviewers' decisions; deduplicate events and key decisions to repository, PR number, and head SHA.
-8. **Mocked end-to-end tests and recovery docs.** Cover races, timeouts, duplicate dispatch, stale/missing claims, pagination, merged/closed PRs, review replay, and persistence failures.
-9. **Pilot and release.** Install to a disposable repository, verify permissions/secrets and recovery scenarios, document outcomes, then mark Ready for pilot. Enable schedule only as an explicit opt-in.
+
+1. **Contracts and config validation — complete.** Define Issue/PR sections, state model, required sections, repository settings, and configuration validation.
+2. **Pure preflight and selection — complete.** Test eligibility, dependencies, open-PR duplication, unknown provider states, deterministic ordering, and concurrency.
+3. **Durable claims — complete.** [Issue #4](https://github.com/japiohopman/development-template/issues/4) / [PR #13](https://github.com/japiohopman/development-template/pull/13). Use a stable claim ID, compare-and-swap, conflict detection, and read-back after ambiguous writes.
+4. **Provider adapter — implemented, review-gated.** [Issue #5](https://github.com/japiohopman/development-template/issues/5) / [PR #14](https://github.com/japiohopman/development-template/pull/14). Validate task packets, source identity, claims, confirmation, and uncertain provider outcomes.
+5. **Session/PR lifecycle reconciliation — merged.** [Issue #6](https://github.com/japiohopman/development-template/issues/6) / [PR #17](https://github.com/japiohopman/development-template/pull/17). Compare real sessions with Issues, branches, claims, and PRs; fail closed on missing or ambiguous metadata. The consumer reconciliation workflow is manual and read-only.
+6. **PR contract gate — implemented in the Issue #7 review branch.** Validate the governing Issue, substantive PR evidence, exact changed paths, exact head SHA, required check runs, no-op commits, risks, and the next owner/action. The consumer workflow is read-only and runs trusted base-branch code only. Configuration and independent review are required before treating it as operational.
+7. **Connect the dispatcher to GitHub Actions — not built.** [Issue #19](https://github.com/japiohopman/development-template/issues/19). Wire the actual consumer workflow to configuration, complete snapshot, preflight, one-Issue selection, durable claim, Jules dispatch, and reconciliation. Start manual-only and plan-first; no schedule or unattended live dispatch.
+8. **Trusted review relay — not built.** [Issue #8](https://github.com/japiohopman/development-template/issues/8). Consume trusted review events, deduplicate them, bind each decision to repository/PR/head SHA, and route requested fixes back to existing work.
+9. **Mocked end-to-end tests and disposable pilot — not complete.** [Issue #9](https://github.com/japiohopman/development-template/issues/9). Cover races, timeouts, duplicate dispatch, stale/missing claims, pagination, PR/Issue state, review replay, and persistence failures; then install into a throwaway repository and document permissions, recovery, teardown, and pilot results.
+
+## Workflow-first implementation rule
+
+- A workflow under the consuming repository's root .github/workflows/ decides when each step runs and which permissions it receives.
+- A script under scripts/ reads live GitHub/provider evidence and calls the reusable decision functions.
+- A module under src/ makes a deterministic decision and is tested without real API calls.
+- Documentation and Actions output must explain the result, whether state changed, and the next safe action in everyday language.
+
+A module that has tests but is not called by an executable workflow is a building block, not a completed automatic workflow.
 
 ## Definition of done for live dispatch
-- Exact authorization value is enforced by the workflow and adapter.
-- A durable claim is committed before provider session creation.
+
+- The workflow and adapter enforce the exact authorization value.
+- A durable claim is committed before an external provider session is created.
 - Claim conflicts and ambiguous provider responses cannot trigger duplicate work.
-- Incomplete API snapshots, unknown states, API failures, and failed state writes block safely.
-- One current open PR or unresolved provider session prevents a second task for the same work.
-- Tests prove a merged PR resolves an old session while closed-but-unmerged PRs do not.
+- Incomplete snapshots, unknown states, API failures, and failed persistence block safely.
+- An unresolved session or PR prevents a duplicate task.
+- A merged PR only resolves a session after ownership is verified; closed-but-unmerged PRs remain unresolved.
+- The PR gate binds evidence and required checks to the exact current head SHA and cannot execute PR-head code in a privileged workflow.
+- The trusted review relay invalidates stale approvals and treats acknowledgement reactions/comments as acknowledgements only.
+- A disposable consumer pilot and documented recovery paths pass before the template status changes to Ready for pilot.
 - Human merge approval remains the default.
