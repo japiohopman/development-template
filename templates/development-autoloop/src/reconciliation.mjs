@@ -352,7 +352,7 @@ export async function reconcileSessionLifecycle({
       });
       continue;
     }
-    if (!branchRecord || (branchRecord.name && branchRecord.name !== branch)) {
+    if (!branchRecord || typeof branchRecord.name !== 'string' || branchRecord.name !== branch) {
       blockers.push({
         session: id,
         claimId,
