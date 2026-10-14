@@ -182,12 +182,14 @@ async function run() {
         const trustedReviews = reviews.filter(item =>
           config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())
           && ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(String(item?.state || '').toUpperCase()));
-        trustedReviews.sort((a, b) => {
+        const currentHeadReviews = trustedReviews.filter(item => String(item?.commit_id || '').toLowerCase() === currentHead.toLowerCase());
+        const eligibleReviews = currentHeadReviews.length ? currentHeadReviews : trustedReviews;
+        eligibleReviews.sort((a, b) => {
           const timeA = String(a?.submitted_at || a?.updated_at || a?.created_at || '');
           const timeB = String(b?.submitted_at || b?.updated_at || b?.created_at || '');
           return timeA.localeCompare(timeB) || (Number(a?.id) || 0) - (Number(b?.id) || 0);
         });
-        reviewEvent = trustedReviews.at(-1) || null;
+        reviewEvent = eligibleReviews.at(-1) || null;
         if (!reviewEvent) {
           emit({
             success: false, mutated: false, requiresWrite: false, decisionCode: 'WAITING_FOR_TRUSTED_REVIEW',
