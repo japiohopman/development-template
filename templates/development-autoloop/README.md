@@ -8,7 +8,7 @@ Development Autoloop is a reusable GitHub workflow for managing development task
 
 The workflow is the coordinator. Code under src/ contains reusable decisions, code under scripts/ reads live data and calls those decisions, and workflows under .github/workflows/ decide when steps run and which permissions are available.
 
-**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is a separate unfinished milestone in [Issue #19](https://github.com/japiohopman/development-template/issues/19). The trusted review relay is not connected end to end, and the disposable consumer-repository pilot remains outstanding.
+**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is implemented as a manual-only, plan-first workflow in [Issue #19](https://github.com/japiohopman/development-template/issues/19). Live session creation remains disabled by default, the trusted review relay is not connected end to end, and the disposable consumer-repository pilot remains outstanding.
 
 ## A simple way to understand the parts
 
@@ -28,7 +28,7 @@ The source code should not be mistaken for a running workflow. Each step must be
 | Configuration and contracts | Check that settings and Issues/PRs contain the required information. | Built and tested |
 | Preflight and selection | Look for existing work and choose only one eligible Issue from a complete snapshot. | Decision logic built and tested |
 | Durable claim | Reserve an Issue so competing runs do not knowingly start the same task. | Built and tested |
-| Provider adapter and dispatch logic | Prepare and validate a task packet for Jules and handle uncertain results carefully. | Logic exists; not wired to a live Actions dispatcher |
+| Provider adapter and dispatch logic | Prepare and validate a task packet for Jules and handle uncertain results carefully. | Built and tested; manual plan-first Actions dispatcher connected |
 | Session/Issue/branch/PR reconciliation | Compare provider sessions with real GitHub Issues, branches, PRs, and claims. | Read-only reconciliation built; consumer workflow is manual-only |
 | PR contract gate | Verify current-head evidence, changed paths, configured required checks, and handoff completeness. | Implemented in the Issue #7 draft; requires review and consumer configuration |
 | Trusted review relay | Turn trusted approve/changes-requested decisions into safe, non-duplicated next steps. | Not built |
@@ -41,6 +41,17 @@ See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining seq
 In the main development-template repository, **Template validation** is the active workflow. It checks source-file syntax and runs unit tests. It is not the task dispatcher and does not create a Jules session.
 
 The workflows under this template's nested .github/workflows/ folder are examples for a consuming repository. GitHub does not run them from this nested directory. After installation, copy the template contents into the consumer repository so the workflow files live in .github/workflows/ at the repository root.
+
+### Autoloop plan dispatcher
+
+The consumer workflow `.github/workflows/autoloop-dispatch.yml` and script `scripts/autoloop-runner.mjs` provide the initial manual-only, plan-first task coordinator. It runs on `workflow_dispatch` only and requires explicit `confirm_repository` confirmation matching `GITHUB_REPOSITORY`.
+
+Its execution path:
+- Validates repository confirmation and project configuration (`config/autoloop.json`).
+- Assembles a complete paginated API snapshot of Issues, open PRs, claim ledger state (`AUTOLOOP_STATE_BRANCH`), and provider sessions.
+- Evaluates candidate selection deterministically (`selectCandidateIssue`).
+- Produces a plain-language plan report outputting the selected candidate (or blocker / eligibility reason), mutation status (`mutated: false`), and safe next action.
+- Operates strictly side-effect free: no claims are written, no provider sessions are created, and no Issues or PRs are mutated.
 
 ### PR contract gate
 
