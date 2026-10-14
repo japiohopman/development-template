@@ -82,8 +82,9 @@ function sessionIdOf(session) {
 export function extractSessionClaimId(session) {
   const text = String(session?.prompt ?? '') + ' ' + String(session?.title ?? '');
   const matches = [...text.matchAll(/\[claimId:\s*([^\s\]]+)\]/ig)].map(match => match[1].trim());
-  if (matches.length !== 1) return null;
-  return matches[0] || null;
+  const distinctMatches = [...new Set(matches)];
+  if (distinctMatches.length !== 1) return null;
+  return distinctMatches[0] || null;
 }
 
 function issueIsLinkedToPullRequest(pullRequest, issueNumber) {
@@ -191,7 +192,7 @@ export async function reconcileSessionLifecycle({
     }], { timestamp, sessionsInspected: sessions.length });
   }
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
-    || typeof snapshot.head !== 'string' || !snapshot.head.trim()
+    || typeof snapshot.head !== 'string' || !/^[0-9a-f]{40}$/i.test(snapshot.head)
     || !Array.isArray(snapshot.claims)) {
     return report('RECONCILIATION_STATE_INVALID', targetRepo, [{
       code: 'BLOCK_CLAIM_STATE_INVALID',
