@@ -8,6 +8,7 @@
   "required": [
     "schemaVersion",
     "enabled",
+    "repairDispatchEnabled",
     "defaultBranch",
     "runMode",
     "workProvider",
@@ -29,6 +30,9 @@
       "const": 1
     },
     "enabled": {
+      "type": "boolean"
+    },
+    "repairDispatchEnabled": {
       "type": "boolean"
     },
     "defaultBranch": {
