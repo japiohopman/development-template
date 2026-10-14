@@ -1,36 +1,46 @@
 /**
- * Pure, read-only Session, Issue, Claim, Branch, and PR lifecycle reconciler.
- * Connects paginated provider session reads and GitHub state without mutating state,
- * creating provider sessions, writing comments/labels, or dispatching work.
+ * Read-only, fail-closed reconciliation of Jules sessions against GitHub and
+ * the durable claim ledger. This module never mutates GitHub or provider state.
  */
-
 import { validateConfig } from './config.mjs';
-import { normalizeRepositoryIdentity } from './claims.mjs';
+import { normalizeRepositoryIdentity, validateClaimRecord } from './claims.mjs';
 import {
   sessionDisposition,
   isOpenPullRequest,
   isMergedPullRequest,
-  extractPullRequestNumber,
-  findSessionPullRequest
+  extractPullRequestNumber
 } from './preflight.mjs';
+
+const report = (decisionCode, repository, blockers, details = {}) => ({
+  success: blockers.length === 0 && decisionCode === 'RECONCILIATION_CLEAR',
+  decisionCode,
+  timestamp: details.timestamp,
+  repository,
+  mutated: false,
+  summary: blockers.length
+    ? blockers.length + ' lifecycle reconciliation blocker(s) detected.'
+    : 'Session, Issue, claim, branch, and PR lifecycle reconciliation is clear.',
+  sessionsInspected: details.sessionsInspected ?? 0,
+  claimsInspected: details.claimsInspected ?? 0,
+  blockers,
+  nextSafeAction: blockers.length
+    ? 'Resolve the reported evidence gaps manually; do not dispatch or create replacement work.'
+    : 'Read-only evidence is consistent. This report does not authorize dispatch or mutate claims.'
+});
+
+function safeErrorCode(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const status = Number.isInteger(error?.status) ? 'HTTP_' + error.status : '';
+  return code || status || 'READ_FAILED';
+}
 
 function parseRepositoryUrl(repositoryUrl) {
   let parsed;
-  try {
-    parsed = new URL(repositoryUrl);
-  } catch {
-    return null;
-  }
+  try { parsed = new URL(repositoryUrl); } catch { return null; }
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-
   let segments;
-  try {
-    segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-  } catch {
-    return null;
-  }
+  try { segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent); } catch { return null; }
   if (segments.length !== 2 || segments.some(segment => !segment)) return null;
-
   return {
     origin: parsed.origin.toLowerCase(),
     owner: segments[0].toLowerCase(),
@@ -40,19 +50,10 @@ function parseRepositoryUrl(repositoryUrl) {
 
 function pullRequestUrlMatchesRepository(pullRequestUrl, expectedRepository) {
   let parsed;
-  try {
-    parsed = new URL(pullRequestUrl);
-  } catch {
-    return false;
-  }
+  try { parsed = new URL(pullRequestUrl); } catch { return false; }
   if (parsed.protocol !== 'https:' || parsed.origin.toLowerCase() !== expectedRepository.origin) return false;
-
   let segments;
-  try {
-    segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-  } catch {
-    return false;
-  }
+  try { segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent); } catch { return false; }
   return segments.length >= 4
     && segments[0].toLowerCase() === expectedRepository.owner
     && segments[1].toLowerCase() === expectedRepository.repository
@@ -60,465 +61,515 @@ function pullRequestUrlMatchesRepository(pullRequestUrl, expectedRepository) {
     && /^\d+$/.test(segments[3]);
 }
 
-/**
- * Extract correlation claim ID from session prompt or title if present.
- * Format: [claimId: claim-123-xyz]
- * @param {object} session
- * @returns {string|null}
- */
+function repositoryMatches(left, right) {
+  const a = normalizeRepositoryIdentity(left);
+  const b = normalizeRepositoryIdentity(right);
+  return a.valid && b.valid
+    && a.repository.owner === b.repository.owner
+    && a.repository.repo === b.repository.repo;
+}
+
+function sessionIdOf(session) {
+  if (typeof session?.id === 'string' && session.id.trim()) return session.id.trim();
+  if (typeof session?.name === 'string' && session.name.trim()) {
+    const parts = session.name.split('/');
+    return parts[parts.length - 1] || null;
+  }
+  return null;
+}
+
 export function extractSessionClaimId(session) {
-  const text = `${session?.prompt ?? ''} ${session?.title ?? ''}`;
-  const match = text.match(/\[claimId:\s*([^\s\]]+)\]/i);
-  return match ? match[1].trim() : null;
+  const text = String(session?.prompt ?? '') + ' ' + String(session?.title ?? '');
+  const matches = [...text.matchAll(/\[claimId:\s*([^\s\]]+)\]/ig)].map(match => match[1].trim());
+  const distinctMatches = [...new Set(matches)];
+  if (distinctMatches.length !== 1) return null;
+  return distinctMatches[0] || null;
+}
+
+function issueIsLinkedToPullRequest(pullRequest, issueNumber) {
+  const searchable = String(pullRequest?.title ?? '') + '\n' + String(pullRequest?.body ?? '');
+  return new RegExp('#' + issueNumber + '\\b').test(searchable)
+    || new RegExp('/issues/' + issueNumber + '(?:\\b|$)').test(searchable);
 }
 
 /**
- * Execute read-only reconciliation across provider sessions, durable claims, issues, branches, and pull requests.
- * Fails closed on any API error, pagination fault, JSON error, or missing metadata.
- *
- * @param {object} options
- * @param {object} [options.config] Autoloop configuration object
- * @param {*} options.repository Repository identity ({ owner, repo } or string)
- * @param {object} options.providerClient Provider client instance with listSessions()
- * @param {Function} [options.fetchPullRequest] Function(prNumber) => Promise<PR>
- * @param {Function} [options.fetchIssue] Function(issueNumber) => Promise<Issue>
- * @param {Function} [options.fetchBranch] Function(branchName) => Promise<Branch>
- * @param {object} [options.stateAdapter] Durable claim state adapter with readState()
- * @param {Date|string|number} [options.now=new Date()] Current timestamp
- * @returns {Promise<object>} Structured reconciliation report
+ * Reconcile the target repository's complete Jules session inventory against its
+ * read-only GitHub Issue/branch/PR adapters and durable claim ledger.
+ * All adapters are mandatory. Missing evidence is a blocker, never an empty set.
  */
+function sessionPullRequestRefs(session) {
+  if (session?.outputs !== undefined && session?.outputs !== null && !Array.isArray(session.outputs)) {
+    return { invalid: true, refs: [] };
+  }
+  const outputs = Array.isArray(session?.outputs) ? session.outputs : [];
+  const refs = [];
+  for (const output of outputs) {
+    if (!output || typeof output !== 'object' || !Object.prototype.hasOwnProperty.call(output, 'pullRequest')) continue;
+    const ref = output.pullRequest;
+    if (!ref || typeof ref.url !== 'string' || !ref.url.trim()) {
+      return { invalid: true, refs: [] };
+    }
+    refs.push(ref);
+  }
+  return { invalid: false, refs };
+}
+
 export async function reconcileSessionLifecycle({
   config = null,
   repository,
   providerClient,
-  fetchPullRequest = null,
-  fetchIssue = null,
-  fetchBranch = null,
-  stateAdapter = null,
+  fetchPullRequest,
+  fetchIssue,
+  fetchBranch,
+  stateAdapter,
   now = new Date()
-}) {
-  const timestamp = new Date(now).toISOString();
+} = {}) {
+  const date = new Date(now);
+  const timestamp = Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+  const repoCheck = normalizeRepositoryIdentity(repository);
+  if (!repoCheck.valid) {
+    return report('RECONCILIATION_INVALID_REPOSITORY', null, [{
+      code: 'INVALID_REPOSITORY',
+      reason: 'Repository identity is missing or invalid.'
+    }], { timestamp });
+  }
+  const targetRepo = repoCheck.repository;
+  const expectedRepoUrl = 'https://github.com/' + targetRepo.owner + '/' + targetRepo.repo;
+  const expectedRepo = parseRepositoryUrl(expectedRepoUrl);
 
   if (config) {
     const configCheck = validateConfig(config);
     if (!configCheck.valid) {
-      return {
-        success: false,
-        decisionCode: 'RECONCILIATION_INVALID_CONFIG',
-        timestamp,
-        repository: null,
-        mutated: false,
-        summary: 'Reconciliation failed due to invalid configuration.',
-        blockers: configCheck.errors.map(e => ({ path: e.path, code: e.code, reason: e.message })),
-        sessionsInspected: 0,
-        claimsInspected: 0,
-        nextSafeAction: 'Fix configuration validation errors before running reconciliation.'
-      };
+      return report('RECONCILIATION_INVALID_CONFIG', targetRepo,
+        configCheck.errors.map(error => ({ code: error.code, path: error.path, reason: error.message })),
+        { timestamp });
     }
   }
 
-  const repoCheck = normalizeRepositoryIdentity(repository);
-  if (!repoCheck.valid) {
-    return {
-      success: false,
-      decisionCode: 'RECONCILIATION_INVALID_REPOSITORY',
-      timestamp,
-      repository: null,
-      mutated: false,
-      summary: 'Reconciliation failed due to invalid repository identity.',
-      blockers: [{ code: 'INVALID_REPOSITORY', reason: 'Repository identity is missing or invalid.' }],
-      sessionsInspected: 0,
-      claimsInspected: 0,
-      nextSafeAction: 'Provide a valid owner/repo repository identity.'
-    };
-  }
-  const targetRepo = repoCheck.repository;
-  const targetRepoUrl = `https://github.com/${targetRepo.owner}/${targetRepo.repo}`;
-  const expectedRepo = parseRepositoryUrl(targetRepoUrl);
-
-  if (!providerClient || typeof providerClient.listSessions !== 'function') {
-    return {
-      success: false,
-      decisionCode: 'RECONCILIATION_PROVIDER_REQUIRED',
-      timestamp,
-      repository: targetRepo,
-      mutated: false,
-      summary: 'Provider client with listSessions() is required for reconciliation.',
-      blockers: [{ code: 'PROVIDER_CLIENT_REQUIRED', reason: 'A valid providerClient instance with listSessions() is required.' }],
-      sessionsInspected: 0,
-      claimsInspected: 0,
-      nextSafeAction: 'Supply a valid provider client.'
-    };
+  const missingAdapters = [];
+  if (!providerClient || typeof providerClient.listSessions !== 'function') missingAdapters.push('providerClient.listSessions');
+  if (!providerClient || typeof providerClient.findSourceForRepository !== 'function') missingAdapters.push('providerClient.findSourceForRepository');
+  if (typeof fetchIssue !== 'function') missingAdapters.push('fetchIssue');
+  if (typeof fetchBranch !== 'function') missingAdapters.push('fetchBranch');
+  if (typeof fetchPullRequest !== 'function') missingAdapters.push('fetchPullRequest');
+  if (!stateAdapter || typeof stateAdapter.readState !== 'function') missingAdapters.push('stateAdapter.readState');
+  if (missingAdapters.length) {
+    return report('RECONCILIATION_ADAPTERS_REQUIRED', targetRepo, [{
+      code: 'BLOCK_REQUIRED_EVIDENCE_ADAPTER_MISSING',
+      reason: 'Read-only reconciliation requires all authoritative evidence adapters: ' + missingAdapters.join(', ') + '.'
+    }], { timestamp });
   }
 
-  let sessions = [];
+  let source;
+  try {
+    source = await providerClient.findSourceForRepository(targetRepo);
+  } catch (error) {
+    return report('RECONCILIATION_SOURCE_LOOKUP_FAILED', targetRepo, [{
+      code: 'BLOCK_SOURCE_LOOKUP_FAILED',
+      reason: 'Could not verify the authoritative Jules source (' + safeErrorCode(error) + ').'
+    }], { timestamp });
+  }
+  const sourceOwner = source?.githubRepo?.owner;
+  const sourceRepo = source?.githubRepo?.repo;
+  if (!source || typeof source.name !== 'string' || !source.name.trim()
+    || typeof sourceOwner !== 'string' || typeof sourceRepo !== 'string'
+    || sourceOwner.trim().toLowerCase() !== targetRepo.owner
+    || sourceRepo.trim().toLowerCase() !== targetRepo.repo) {
+    return report('RECONCILIATION_SOURCE_UNVERIFIED', targetRepo, [{
+      code: 'BLOCK_SOURCE_IDENTITY_UNVERIFIED',
+      reason: 'Jules did not return a source whose authoritative owner/repository exactly matches the target repository.'
+    }], { timestamp });
+  }
+  const expectedSourceName = source.name;
+
+  let sessions;
   try {
     sessions = await providerClient.listSessions();
-  } catch (err) {
-    const safeMessage = String(err?.message || err).replace(/X-Goog-Api-Key:\s*[^\s\r\n]+/gi, 'X-Goog-Api-Key: [REDACTED]');
-    return {
-      success: false,
-      decisionCode: 'RECONCILIATION_PAGINATION_FAILED',
-      timestamp,
-      repository: targetRepo,
-      mutated: false,
-      summary: 'Provider sessions list could not be fetched completely: ' + safeMessage,
-      blockers: [{
-        code: 'PROVIDER_PAGINATION_ERROR',
-        reason: 'Provider API failure, malformed JSON, or pagination error during session inventory: ' + safeMessage
-      }],
-      sessionsInspected: 0,
-      claimsInspected: 0,
-      nextSafeAction: 'Do not interpret provider API errors as an empty queue. Investigate provider service or pagination faults.'
-    };
+  } catch (error) {
+    return report('RECONCILIATION_PAGINATION_FAILED', targetRepo, [{
+      code: 'BLOCK_PROVIDER_INVENTORY_FAILED',
+      reason: 'The complete Jules session inventory could not be verified (' + safeErrorCode(error) + ').'
+    }], { timestamp });
   }
-
   if (!Array.isArray(sessions)) {
-    return {
-      success: false,
-      decisionCode: 'RECONCILIATION_PAGINATION_FAILED',
-      timestamp,
-      repository: targetRepo,
-      mutated: false,
-      summary: 'Provider session inventory returned non-array response.',
-      blockers: [{ code: 'PROVIDER_MALFORMED_RESPONSE', reason: 'Provider listSessions() did not return an array.' }],
-      sessionsInspected: 0,
-      claimsInspected: 0,
-      nextSafeAction: 'Fix provider client response handling.'
-    };
+    return report('RECONCILIATION_PAGINATION_FAILED', targetRepo, [{
+      code: 'BLOCK_PROVIDER_INVENTORY_MALFORMED',
+      reason: 'Jules session inventory was not a complete array.'
+    }], { timestamp });
   }
 
-  let claims = [];
-  if (stateAdapter && typeof stateAdapter.readState === 'function') {
-    try {
-      const stateSnapshot = await stateAdapter.readState();
-      claims = Array.isArray(stateSnapshot?.claims) ? stateSnapshot.claims : [];
-    } catch (err) {
-      return {
-        success: false,
-        decisionCode: 'RECONCILIATION_STATE_READ_FAILED',
-        timestamp,
-        repository: targetRepo,
-        mutated: false,
-        summary: 'Authoritative claim state store read failed: ' + String(err?.message || err),
-        blockers: [{ code: 'STATE_STORE_READ_ERROR', reason: 'Could not read authoritative claim state store: ' + String(err?.message || err) }],
-        sessionsInspected: sessions.length,
-        claimsInspected: 0,
-        nextSafeAction: 'Restore state store access and repair malformed state records.'
-      };
-    }
+  let snapshot;
+  try {
+    snapshot = await stateAdapter.readState();
+  } catch (error) {
+    return report('RECONCILIATION_STATE_READ_FAILED', targetRepo, [{
+      code: 'BLOCK_CLAIM_STATE_READ_FAILED',
+      reason: 'The authoritative claim ledger could not be read (' + safeErrorCode(error) + ').'
+    }], { timestamp, sessionsInspected: sessions.length });
+  }
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
+    || typeof snapshot.head !== 'string' || !/^[0-9a-f]{40}$/i.test(snapshot.head)
+    || !Array.isArray(snapshot.claims)) {
+    return report('RECONCILIATION_STATE_INVALID', targetRepo, [{
+      code: 'BLOCK_CLAIM_STATE_INVALID',
+      reason: 'Claim ledger is missing, uninitialized, or malformed; it cannot be treated as an empty claim list.'
+    }], { timestamp, sessionsInspected: sessions.length });
   }
 
-  let expectedSourceName = null;
-  if (typeof providerClient.findSourceForRepository === 'function') {
-    try {
-      const src = await providerClient.findSourceForRepository(targetRepo);
-      if (src && src.name) expectedSourceName = src.name;
-    } catch {
-      // If findSourceForRepository fails, fallback to checking session sourceContext directly
-    }
-  }
-  if (!expectedSourceName) {
-    expectedSourceName = `sources/github/${targetRepo.owner}/${targetRepo.repo}`;
-  }
-
+  const claims = snapshot.claims;
   const blockers = [];
-  const activeSessionsByClaimId = new Map();
-  const activeSessionsByIssue = new Map();
+  const claimsById = new Map();
+  for (const claim of claims) {
+    const validation = validateClaimRecord(claim);
+    if (!validation.valid) {
+      blockers.push({
+        claimId: claim?.claimId ?? null,
+        code: 'BLOCK_MALFORMED_CLAIM',
+        reason: 'Claim ledger contains a malformed claim record; reconciliation cannot safely continue for that record.'
+      });
+      continue;
+    }
+    if (!repositoryMatches(claim.repository, targetRepo)) {
+      blockers.push({
+        claimId: claim.claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_CLAIM_REPOSITORY_MISMATCH',
+        reason: 'Claim ' + claim.claimId + ' belongs to a different repository than the configured target.'
+      });
+      continue;
+    }
+    const expectedProvider = String(config?.workProvider ?? 'jules').trim().toLowerCase();
+    if (claim.provider.trim().toLowerCase() !== expectedProvider) {
+      blockers.push({
+        claimId: claim.claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_CLAIM_PROVIDER_MISMATCH',
+        reason: 'Claim ' + claim.claimId + ' uses provider ' + claim.provider + ', not the configured provider.'
+      });
+      continue;
+    }
+    if (!claimsById.has(claim.claimId)) claimsById.set(claim.claimId, []);
+    claimsById.get(claim.claimId).push(claim);
+  }
+  for (const [claimId, entries] of claimsById.entries()) {
+    if (entries.length !== 1) {
+      blockers.push({
+        claimId,
+        code: 'BLOCK_DUPLICATE_CLAIM_ID',
+        reason: 'The claim ledger contains more than one record for claimId ' + claimId + '.'
+      });
+    }
+  }
+  if (blockers.length) {
+    return report('RECONCILIATION_STATE_INVALID', targetRepo, blockers, {
+      timestamp, sessionsInspected: sessions.length, claimsInspected: claims.length
+    });
+  }
 
+  const seenClaimIds = new Set();
+  const seenSessionIds = new Set();
   for (const session of sessions) {
     if (!session || typeof session !== 'object' || Array.isArray(session)) {
       blockers.push({
         session: 'unknown',
         code: 'BLOCK_MALFORMED_SESSION',
-        reason: 'Provider session inventory contains a non-object record.'
+        reason: 'Jules inventory contains a non-object session record.'
       });
       continue;
     }
 
-    const sessionName = session.name ?? session.id ?? 'unknown';
     const sessionSource = session.sourceContext?.source ?? session.source?.name ?? session.source ?? null;
-
-    if (expectedSourceName && sessionSource && sessionSource !== expectedSourceName) {
-      // Belongs to a different repository source; skip safely
+    if (typeof sessionSource !== 'string' || !sessionSource.trim() || sessionSource !== sessionSource.trim()) {
+      blockers.push({
+        session: session.name ?? session.id ?? 'unknown',
+        code: 'BLOCK_MISSING_SESSION_SOURCE',
+        reason: 'Session source metadata is missing or malformed; this session cannot be safely assigned to a repository.'
+      });
+      continue;
+    }
+    if (sessionSource !== expectedSourceName) {
+      if (/^sources\/github\/[^/]+\/[^/]+$/.test(sessionSource)) continue;
+      blockers.push({
+        session: session.name ?? session.id ?? 'unknown',
+        code: 'BLOCK_UNRECOGNIZED_SESSION_SOURCE',
+        reason: 'Session source does not match the target and is not a recognizable GitHub repository source; ownership cannot be proven.'
+      });
       continue;
     }
 
-    const sourceUnknown = !sessionSource;
+    const id = sessionIdOf(session);
+    if (!id) {
+      blockers.push({
+        session: session.name ?? 'unknown',
+        code: 'BLOCK_MISSING_SESSION_ID',
+        reason: 'Target-repository session has no authoritative session ID.'
+      });
+      continue;
+    }
+    if (seenSessionIds.has(id)) {
+      blockers.push({
+        session: id,
+        code: 'BLOCK_DUPLICATE_SESSION_ID',
+        reason: 'The provider inventory contains duplicate session IDs.'
+      });
+      continue;
+    }
+    seenSessionIds.add(id);
+
     const disposition = sessionDisposition(session);
-    const prRef = findSessionPullRequest(session);
-    let prNumber = null;
-
-    // Branch verification
-    const startingBranch = session.sourceContext?.githubRepoContext?.startingBranch ?? session.startingBranch ?? null;
-    if (startingBranch && typeof fetchBranch === 'function') {
-      try {
-        const branchObj = await fetchBranch(startingBranch);
-        if (!branchObj) {
-          blockers.push({
-            session: sessionName,
-            branch: startingBranch,
-            code: 'BLOCK_BRANCH_NOT_FOUND',
-            reason: `Starting branch '${startingBranch}' referenced by session ${sessionName} could not be verified in GitHub.`
-          });
-        }
-      } catch (err) {
-        return {
-          success: false,
-          decisionCode: 'RECONCILIATION_API_FAILED',
-          timestamp,
-          repository: targetRepo,
-          mutated: false,
-          summary: `API error verifying branch '${startingBranch}': ` + String(err?.message || err),
-          blockers: [{
-            session: sessionName,
-            branch: startingBranch,
-            code: 'BLOCK_API_ERROR',
-            reason: `API error verifying branch '${startingBranch}': ` + String(err?.message || err)
-          }],
-          sessionsInspected: sessions.length,
-          claimsInspected: claims.length,
-          nextSafeAction: 'Resolve GitHub API connectivity/lookup failure before re-running reconciliation.'
-        };
-      }
-    }
-
-    if (prRef?.url) {
-      if (!pullRequestUrlMatchesRepository(prRef.url, expectedRepo)) {
-        blockers.push({
-          session: sessionName,
-          state: disposition.state,
-          pullRequest: extractPullRequestNumber(prRef.url),
-          code: 'BLOCK_INVALID_PR_URL',
-          reason: 'Associated PR URL is malformed or does not belong to target repository ' + targetRepo.owner + '/' + targetRepo.repo + '.'
-        });
-        continue;
-      }
-      prNumber = extractPullRequestNumber(prRef.url);
-      if (prNumber === null) {
-        blockers.push({
-          session: sessionName,
-          state: disposition.state,
-          pullRequest: null,
-          code: 'BLOCK_INVALID_PR_NUMBER',
-          reason: 'Associated PR URL has no valid pull request number.'
-        });
-        continue;
-      }
-    }
-
-    if (prNumber !== null) {
-      if (typeof fetchPullRequest !== 'function') {
-        blockers.push({
-          session: sessionName,
-          state: disposition.state,
-          pullRequest: prNumber,
-          code: 'BLOCK_PR_FETCH_REQUIRED',
-          reason: 'Associated PR #' + prNumber + ' requires fetchPullRequest verification function to resolve.'
-        });
-        continue;
-      }
-
-      let pullRequest = null;
-      try {
-        pullRequest = await fetchPullRequest(prNumber);
-      } catch (err) {
-        return {
-          success: false,
-          decisionCode: 'RECONCILIATION_API_FAILED',
-          timestamp,
-          repository: targetRepo,
-          mutated: false,
-          summary: 'API lookup error verifying PR #' + prNumber + ': ' + String(err?.message || err),
-          blockers: [{
-            session: sessionName,
-            pullRequest: prNumber,
-            code: 'BLOCK_API_ERROR',
-            reason: 'API lookup error verifying PR #' + prNumber + ': ' + String(err?.message || err)
-          }],
-          sessionsInspected: sessions.length,
-          claimsInspected: claims.length,
-          nextSafeAction: 'Resolve GitHub API connectivity/lookup failure before re-running reconciliation.'
-        };
-      }
-
-      if (!pullRequest) {
-        blockers.push({
-          session: sessionName,
-          state: disposition.state,
-          pullRequest: prNumber,
-          code: 'BLOCK_PR_LOOKUP_FAILED',
-          reason: 'Associated PR #' + prNumber + ' could not be verified in GitHub.'
-        });
-        continue;
-      }
-
-      if (isMergedPullRequest(pullRequest)) {
-        if (sourceUnknown) {
-          blockers.push({
-            session: sessionName,
-            state: disposition.state,
-            pullRequest: prNumber,
-            code: 'BLOCK_MERGED_PR_MISSING_SOURCE',
-            reason: 'The PR is merged, but session source metadata is missing; repository ownership cannot be verified safely.'
-          });
-          continue;
-        }
-        // Verified merged PR with matching repository source! Session cleared.
-        continue;
-      }
-
-      const prState = String(pullRequest.state ?? '').toLowerCase();
-      if (isOpenPullRequest(pullRequest) || prState === 'closed') {
-        blockers.push({
-          session: sessionName,
-          state: disposition.state,
-          pullRequest: prNumber,
-          code: prState === 'closed' ? 'BLOCK_CLOSED_UNMERGED_PR' : 'BLOCK_OPEN_PR',
-          reason: prState === 'closed'
-            ? 'Associated PR #' + prNumber + ' is closed but unmerged; human classification is required.'
-            : 'Associated PR #' + prNumber + ' is open; work remains active.'
-        });
-        continue;
-      }
-
+    const claimId = extractSessionClaimId(session);
+    if (!claimId) {
       blockers.push({
-        session: sessionName,
+        session: id,
         state: disposition.state,
-        pullRequest: prNumber,
-        code: 'BLOCK_UNKNOWN_PR_STATE',
-        reason: 'Associated PR #' + prNumber + ' has an unknown state (' + prState + ').'
+        code: 'BLOCK_MISSING_CLAIM_ID',
+        reason: 'Session title/prompt must contain exactly one durable [claimId: ...] correlation marker.'
+      });
+      continue;
+    }
+    const matchedClaims = claimsById.get(claimId) ?? [];
+    if (matchedClaims.length !== 1) {
+      blockers.push({
+        session: id,
+        claimId,
+        code: 'BLOCK_SESSION_CLAIM_NOT_FOUND',
+        reason: 'Session references a claimId that is missing or ambiguous in the authoritative claim ledger.'
+      });
+      continue;
+    }
+    const claim = matchedClaims[0];
+    seenClaimIds.add(claimId);
+
+    if (claim.sessionId !== id || (claim.metadata?.providerSessionId && claim.metadata.providerSessionId !== id)) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_SESSION_CLAIM_SESSION_MISMATCH',
+        reason: 'The claim session ID does not exactly match the provider session ID.'
       });
       continue;
     }
 
-    if (sourceUnknown || disposition.disposition === 'blocking') {
+    const branch = session.sourceContext?.githubRepoContext?.startingBranch ?? session.startingBranch ?? null;
+    if (typeof branch !== 'string' || !branch.trim()) {
       blockers.push({
-        session: sessionName,
-        state: disposition.state,
-        pullRequest: null,
-        code: sourceUnknown ? 'BLOCK_MISSING_SESSION_SOURCE' : 'BLOCK_ACTIVE_SESSION',
-        reason: sourceUnknown
-          ? 'Session source is missing; repository ownership cannot be verified safely.'
-          : disposition.reason
-      });
-    }
-
-    const claimId = extractSessionClaimId(session);
-    if (claimId && disposition.disposition === 'blocking') {
-      if (!activeSessionsByClaimId.has(claimId)) {
-        activeSessionsByClaimId.set(claimId, []);
-      }
-      activeSessionsByClaimId.get(claimId).push(sessionName);
-
-      if (stateAdapter) {
-        const matchingClaim = claims.find(c => c.claimId === claimId);
-        if (!matchingClaim) {
-          blockers.push({
-            session: sessionName,
-            claimId,
-            code: 'BLOCK_SESSION_CLAIM_NOT_FOUND',
-            reason: `Session ${sessionName} references claimId ${claimId}, but no matching claim exists in state store.`
-          });
-        } else {
-          const sessionIssue = Number(session.issueNumber ?? session.issue_number);
-          if (Number.isInteger(sessionIssue) && sessionIssue > 0 && matchingClaim.issueNumber !== sessionIssue) {
-            blockers.push({
-              session: sessionName,
-              claimId,
-              code: 'BLOCK_SESSION_CLAIM_MISMATCH',
-              reason: `Session ${sessionName} issue number #${sessionIssue} does not match claim ${claimId} issue number #${matchingClaim.issueNumber}.`
-            });
-          }
-        }
-      }
-    }
-
-    const issueNum = Number(session.issueNumber ?? session.issue_number);
-    if (Number.isInteger(issueNum) && issueNum > 0 && disposition.disposition === 'blocking') {
-      if (!activeSessionsByIssue.has(issueNum)) {
-        activeSessionsByIssue.set(issueNum, []);
-      }
-      activeSessionsByIssue.get(issueNum).push(sessionName);
-    }
-  }
-
-  for (const [claimId, sessionList] of activeSessionsByClaimId.entries()) {
-    if (sessionList.length > 1) {
-      blockers.push({
+        session: id,
         claimId,
-        code: 'BLOCK_MULTIPLE_ACTIVE_SESSIONS',
-        reason: `Multiple active provider sessions (${sessionList.join(', ')}) are associated with claimId ${claimId}.`
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_MISSING_STARTING_BRANCH',
+        reason: 'Session is missing its authoritative starting branch.'
+      });
+      continue;
+    }
+    let branchRecord;
+    try {
+      branchRecord = await fetchBranch(branch);
+    } catch (error) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        branch,
+        code: 'BLOCK_BRANCH_LOOKUP_FAILED',
+        reason: 'GitHub could not verify the session starting branch (' + safeErrorCode(error) + ').'
+      });
+      continue;
+    }
+    if (!branchRecord || typeof branchRecord.name !== 'string' || branchRecord.name !== branch) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        branch,
+        code: 'BLOCK_BRANCH_NOT_FOUND',
+        reason: 'The exact starting branch referenced by the session could not be verified.'
+      });
+      continue;
+    }
+
+    let issue;
+    try {
+      issue = await fetchIssue(claim.issueNumber);
+    } catch (error) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_ISSUE_LOOKUP_FAILED',
+        reason: 'GitHub could not verify governing Issue #' + claim.issueNumber + ' (' + safeErrorCode(error) + ').'
+      });
+      continue;
+    }
+    if (!issue || Number(issue.number) !== claim.issueNumber || !['open', 'closed'].includes(String(issue.state).toLowerCase())) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_ISSUE_IDENTITY_UNVERIFIED',
+        reason: 'The exact governing Issue could not be verified against the claim.'
+      });
+      continue;
+    }
+    const sessionIssue = session.issueNumber ?? session.issue_number;
+    if (sessionIssue !== undefined && sessionIssue !== null
+      && (!Number.isInteger(Number(sessionIssue)) || Number(sessionIssue) !== claim.issueNumber)) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_SESSION_ISSUE_MISMATCH',
+        reason: 'Session issue metadata conflicts with the Issue number stored in its claim.'
+      });
+      continue;
+    }
+
+    const prEvidence = sessionPullRequestRefs(session);
+    if (prEvidence.invalid) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_MALFORMED_PR_OUTPUT',
+        reason: 'Session contains malformed pull request output; linked PR evidence cannot be trusted.'
+      });
+      continue;
+    }
+    if (prEvidence.refs.length === 0) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        state: disposition.state,
+        code: 'BLOCK_SESSION_PR_MISSING',
+        reason: 'No linked pull request is available to verify; session/claim remains unresolved.'
+      });
+      continue;
+    }
+    if (prEvidence.refs.length !== 1) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_MULTIPLE_LINKED_PRS',
+        reason: 'Session references multiple pull requests; a human must classify the work before reconciliation can clear.'
+      });
+      continue;
+    }
+    const prRef = prEvidence.refs[0];
+    if (!pullRequestUrlMatchesRepository(prRef.url, expectedRepo)) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_INVALID_PR_URL',
+        reason: 'Associated PR URL is malformed or belongs to a different repository.'
+      });
+      continue;
+    }
+    const prNumber = extractPullRequestNumber(prRef.url);
+    if (!Number.isInteger(prNumber) || prNumber < 1) {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber,
+        code: 'BLOCK_INVALID_PR_NUMBER',
+        reason: 'Associated PR URL has no valid pull request number.'
+      });
+      continue;
+    }
+
+    let pullRequest;
+    try {
+      pullRequest = await fetchPullRequest(prNumber);
+    } catch (error) {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_PR_LOOKUP_FAILED',
+        reason: 'GitHub could not verify PR #' + prNumber + ' (' + safeErrorCode(error) + ').'
+      });
+      continue;
+    }
+    if (!pullRequest || Number(pullRequest.number) !== prNumber) {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_PR_IDENTITY_UNVERIFIED',
+        reason: 'The PR response does not prove the identity of the linked PR.'
+      });
+      continue;
+    }
+    if (!issueIsLinkedToPullRequest(pullRequest, claim.issueNumber)) {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_PR_ISSUE_LINK_MISSING',
+        reason: 'The linked PR title/body does not identify governing Issue #' + claim.issueNumber + '.'
+      });
+      continue;
+    }
+
+    if (isMergedPullRequest(pullRequest)) {
+      if (String(issue.state).toLowerCase() !== 'closed'
+        || String(issue.state_reason ?? '').toLowerCase() !== 'completed') {
+        blockers.push({
+          session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+          code: 'BLOCK_MERGED_PR_ISSUE_NOT_COMPLETED',
+          reason: 'PR is merged, but its governing Issue is not verified closed as completed.'
+        });
+      }
+      if (claim.reconciliationStatus !== 'RECONCILED'
+        || !['RELEASED', 'RECLAIMED'].includes(claim.status)) {
+        blockers.push({
+          session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+          code: 'BLOCK_CLAIM_REQUIRES_RECONCILIATION',
+          reason: 'PR/Issue appear complete, but the durable claim has not been explicitly reconciled and released.'
+        });
+      }
+      continue;
+    }
+
+    if (isOpenPullRequest(pullRequest)) {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_OPEN_PR',
+        reason: 'Associated PR #' + prNumber + ' is open; existing work must be resolved before another task can start.'
+      });
+    } else if (String(pullRequest.state ?? '').toLowerCase() === 'closed') {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_CLOSED_UNMERGED_PR',
+        reason: 'Associated PR #' + prNumber + ' is closed but unmerged; human classification is required.'
+      });
+    } else {
+      blockers.push({
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_UNKNOWN_PR_STATE',
+        reason: 'Associated PR state is missing or unknown.'
       });
     }
-  }
 
-  for (const [issueNum, sessionList] of activeSessionsByIssue.entries()) {
-    if (sessionList.length > 1) {
+    if (disposition.disposition === 'blocking') {
       blockers.push({
-        issueNumber: issueNum,
-        code: 'BLOCK_MULTIPLE_ACTIVE_SESSIONS',
-        reason: `Multiple active provider sessions (${sessionList.join(', ')}) are associated with Issue #${issueNum}.`
+        session: id, claimId, issueNumber: claim.issueNumber, pullRequest: prNumber,
+        code: 'BLOCK_ACTIVE_PROVIDER_SESSION',
+        reason: disposition.reason
       });
     }
   }
 
   for (const claim of claims) {
-    if (!claim || typeof claim !== 'object' || claim.reconciled === true) continue;
-
-    const claimIssue = Number(claim.issueNumber ?? claim.issue_number);
-    if (typeof fetchIssue === 'function' && Number.isInteger(claimIssue) && claimIssue > 0) {
-      try {
-        const issueObj = await fetchIssue(claimIssue);
-        if (issueObj && String(issueObj.state).toLowerCase() === 'closed') {
-          const reasonRaw = String(issueObj.state_reason ?? '').toLowerCase();
-          if (reasonRaw !== 'completed') {
-            blockers.push({
-              claimId: claim.claimId,
-              issueNumber: claimIssue,
-              code: 'BLOCK_CLOSED_ISSUE_UNRECONCILED',
-              reason: `Governing Issue #${claimIssue} was closed (${reasonRaw || 'unspecified'}), but claim ${claim.claimId} remains active/unreconciled.`
-            });
-          }
-        }
-      } catch (err) {
-        return {
-          success: false,
-          decisionCode: 'RECONCILIATION_API_FAILED',
-          timestamp,
-          repository: targetRepo,
-          mutated: false,
-          summary: `API error verifying governing Issue #${claimIssue}: ` + String(err?.message || err),
-          blockers: [{
-            claimId: claim.claimId,
-            issueNumber: claimIssue,
-            code: 'BLOCK_API_ERROR',
-            reason: `API error verifying governing Issue #${claimIssue}: ` + String(err?.message || err)
-          }],
-          sessionsInspected: sessions.length,
-          claimsInspected: claims.length,
-          nextSafeAction: 'Resolve GitHub API connectivity/lookup failure before re-running reconciliation.'
-        };
-      }
+    if (claim.reconciliationStatus === 'RECONCILED') continue;
+    if (!seenClaimIds.has(claim.claimId)) {
+      blockers.push({
+        claimId: claim.claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_CLAIM_SESSION_NOT_FOUND',
+        reason: 'Unreconciled claim has no matching provider session in the complete inventory; absence is not proof the session was never created.'
+      });
     }
   }
 
-  const success = blockers.length === 0;
-
-  return {
-    success,
-    decisionCode: success ? 'RECONCILIATION_CLEAR' : 'RECONCILIATION_BLOCKED',
-    timestamp,
-    repository: targetRepo,
-    mutated: false,
-    summary: success
-      ? 'Session, Issue, claim, branch, and PR lifecycle reconciliation is clear.'
-      : `${blockers.length} lifecycle reconciliation blocker(s) detected.`,
-    blockers,
-    sessionsInspected: sessions.length,
-    claimsInspected: claims.length,
-    nextSafeAction: success
-      ? 'Reconciliation clear. Safe to proceed with preflight and candidate selection.'
-      : 'Resolve reconciliation blockers manually before attempting dispatch or new session creation.'
-  };
+  return report(blockers.length ? 'RECONCILIATION_BLOCKED' : 'RECONCILIATION_CLEAR',
+    targetRepo, blockers, {
+      timestamp,
+      sessionsInspected: sessions.length,
+      claimsInspected: claims.length
+    });
 }
