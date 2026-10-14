@@ -140,3 +140,18 @@ test('closed or malformed pull request context blocks closed', () => {
   assert.equal(evaluate({ pullRequest: { ...pr, state: 'closed' } }).decisionCode, 'BLOCK_INVALID_PR_CONTEXT');
   assert.equal(evaluate({ pullRequest: { ...pr, head: { sha: 'bad' } } }).decisionCode, 'BLOCK_INVALID_PR_CONTEXT');
 });
+
+
+test('a repaired PR needs explicit addressed and remaining findings before approval advances', () => {
+  const previousRequest = review(810, 'trusted-reviewer', 'CHANGES_REQUESTED', oldHead, '2026-10-14T12:00:00Z', 'Please fix the contract.');
+  const newApprovalMissingDisposition = review(811, 'trusted-reviewer', 'APPROVED', head, '2026-10-14T12:03:00Z', 'LGTM');
+  const blocked = evaluate({ eventReview: newApprovalMissingDisposition, reviews: [previousRequest, newApprovalMissingDisposition] });
+  assert.equal(blocked.decisionCode, 'BLOCK_REPAIR_DISPOSITION_MISSING');
+
+  const newApproval = review(812, 'trusted-reviewer', 'APPROVED', head, '2026-10-14T12:04:00Z',
+    'Findings addressed: Updated the contract validation and added regression coverage.\\nFindings remaining: None.');
+  const approved = evaluate({ eventReview: newApproval, reviews: [previousRequest, newApproval] });
+  assert.equal(approved.decisionCode, 'APPROVED_CURRENT_HEAD');
+  assert.equal(approved.repairDisposition.findingsRemaining, 'None.');
+  assert.deepEqual(approved.repairDisposition.priorChangeRequestedReviewIds, [810]);
+});
