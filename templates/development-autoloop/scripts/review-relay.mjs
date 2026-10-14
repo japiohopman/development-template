@@ -121,20 +121,40 @@ async function run() {
     return;
   }
 
-  const reviewEvent = event?.review || null;
+  let reviewEvent = event?.review || null;
   const commentEvent = event?.comment || null;
-  // Untrusted actors and ordinary comments cannot advance the relay or access provider state.
-  if (eventName === 'pull_request_review'
-    && !config.trustedReviewers.some(login => String(login).toLowerCase() === String(reviewEvent?.user?.login || '').toLowerCase())) {
-    const report = evaluateReviewRelay({ repositoryFullName: repositoryValue, pullRequest, eventName, eventAction,
-      eventReview: reviewEvent, trustedReviewers: config.trustedReviewers });
+  const escalationRequested = isIssueComment
+    && /^\s*(?:\[autoloop:escalate\]|@autoloop\s+escalate)\s*:?\s*[\s\S]+$/i.test(String(commentEvent?.body || ''));
+  const relayReviewRequested = isIssueComment
+    && /^\s*(?:\[autoloop:relay-review\]|@autoloop\s+relay-review)\s*$/i.test(String(commentEvent?.body || ''));
+  const commentActor = String(commentEvent?.user?.login || '');
+  const trustedCommentActor = config.trustedReviewers.some(login => String(login).toLowerCase() === commentActor.toLowerCase());
+
+  // pull_request_review uses a PR merge ref. This privileged runner deliberately
+  // refuses that trigger: review decisions must be re-read on default-branch code
+  // after a trusted reviewer posts [autoloop:relay-review] on the PR.
+  if (eventName === 'pull_request_review') {
+    fail('BLOCK_UNTRUSTED_EVENT_ROUTE',
+      'Privileged review relay cannot run directly on pull_request_review merge refs.',
+      'From the PR conversation, ask a configured trusted reviewer to post [autoloop:relay-review]. The secure workflow will re-read GitHub review evidence from default-branch code.',
+      { pullRequestNumber: prNumber, headSha: currentHead });
+    return;
+  }
+  if (isIssueComment && !escalationRequested && !relayReviewRequested) {
+    const report = evaluateReviewRelay({
+      repositoryFullName: repositoryValue, pullRequest, eventName, eventAction,
+      eventComment: commentEvent, trustedReviewers: config.trustedReviewers
+    });
     emit(report);
     return;
   }
-  if (isIssueComment && !/^\s*(?:\[autoloop:escalate\]|@autoloop\s+escalate)\s*:?\s*[\s\S]+$/i.test(String(commentEvent?.body || ''))) {
-    const report = evaluateReviewRelay({ repositoryFullName: repositoryValue, pullRequest, eventName, eventAction,
-      eventComment: commentEvent, trustedReviewers: config.trustedReviewers });
-    emit(report);
+  if (relayReviewRequested && !trustedCommentActor) {
+    emit({
+      success: false, mutated: false, requiresWrite: false, decisionCode: 'IGNORED_UNTRUSTED_ACTOR',
+      reason: 'Only configured trusted reviewers may request the secure review relay.',
+      nextAction: 'Ask a configured trusted reviewer to post [autoloop:relay-review] on this PR.',
+      repositoryFullName: repositoryValue, pullRequestNumber: prNumber, headSha: currentHead
+    });
     return;
   }
 
