@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const workflow = await readFile(new URL('../.github/workflows/review-relay.yml', import.meta.url), 'utf8');
+const observer = await readFile(new URL('../.github/workflows/review-relay-observer.yml', import.meta.url), 'utf8');
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 
 test('privileged review relay listens to trusted PR-target and comment events, not review merge-ref events or schedules', () => {
@@ -10,6 +11,14 @@ test('privileged review relay listens to trusted PR-target and comment events, n
   assert.doesNotMatch(workflow, /^  pull_request_review:/m);
   assert.match(workflow, /^  issue_comment:/m);
   assert.doesNotMatch(workflow, /^\s+(schedule|push):/m);
+});
+
+test('review observer is unprivileged and does not check out or execute repository code', () => {
+  assert.match(observer, /^  pull_request_review:/m);
+  assert.match(observer, /permissions:\s*\{\}/);
+  assert.doesNotMatch(observer, /checkout@|JULES_API_KEY|GITHUB_TOKEN|contents:\s*write|issues:\s*write/i);
+  assert.match(workflow, /workflow_run:/);
+  assert.match(workflow, /Observe PR review event \(unprivileged\)/);
 });
 
 test('review relay checks out trusted default-branch code and uses the protected Environment', () => {
