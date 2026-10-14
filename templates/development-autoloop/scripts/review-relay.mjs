@@ -374,7 +374,7 @@ async function run() {
     return;
   }
 
-  if (decision.decisionCode === 'BLOCK_REPAIR_CONTEXT_MISSING' && governing.number)
+  if (decision.decisionCode === 'BLOCK_REPAIR_CONTEXT_MISSING' && governing.number) {
     // Check the durable comment marker before requiring live provider context.
     // This keeps a replay idempotent even after the original task is reconciled.
     try {
