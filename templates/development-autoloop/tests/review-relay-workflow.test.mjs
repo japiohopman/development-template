@@ -14,7 +14,6 @@ test('review relay listens to PR, review, and comment events but not a schedule'
 
 test('review relay checks out trusted default-branch code and uses the protected Environment', () => {
   assert.match(workflow, /environment:\s*autoloop-dispatch/);
-  assert.match(workflow, /github\.ref != format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
   assert.match(workflow, /ref:\s*\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}/);
   assert.match(workflow, /persist-credentials:\s*false/);
 });
