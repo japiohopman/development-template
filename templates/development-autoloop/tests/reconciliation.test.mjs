@@ -298,3 +298,50 @@ test('malformed, source-less, and duplicate sessions block', async () => {
   }));
   assert.equal(duplicateResult.blockers.some(blocker => blocker.code === 'BLOCK_DUPLICATE_SESSION_ID'), true);
 });
+
+
+test('a malformed or mismatched branch response is not accepted as proof of existence', async () => {
+  for (const branchRecord of [{}, { name: 'another-branch' }, null]) {
+    const result = await reconcileSessionLifecycle(options({
+      fetchBranch: async () => branchRecord
+    }));
+    assert.equal(result.success, false);
+    assert.equal(result.blockers.some(blocker => blocker.code === 'BLOCK_BRANCH_NOT_FOUND'), true);
+  }
+});
+
+test('a fetched Issue with a mismatching number blocks reconciliation', async () => {
+  const result = await reconcileSessionLifecycle(options({
+    fetchIssue: async () => ({ number: 99, state: 'open', title: 'wrong Issue' })
+  }));
+  assert.equal(result.success, false);
+  assert.equal(result.blockers.some(blocker => blocker.code === 'BLOCK_ISSUE_IDENTITY_UNVERIFIED'), true);
+});
+
+test('a PR that does not identify its governing Issue blocks reconciliation', async () => {
+  const result = await reconcileSessionLifecycle(options({
+    fetchPullRequest: async number => makePullRequest({ number, title: 'Unrelated change', body: 'No issue linked here' })
+  }));
+  assert.equal(result.success, false);
+  assert.equal(result.blockers.some(blocker => blocker.code === 'BLOCK_PR_ISSUE_LINK_MISSING'), true);
+});
+
+test('a valid correlation marker may appear in both the session title and prompt but conflicting markers block', () => {
+  assert.equal(extractSessionClaimId({ title: '[claimId: same]', prompt: '[claimId: same]' }), 'same');
+  assert.equal(extractSessionClaimId({ title: '[claimId: one]', prompt: '[claimId: two]' }), null);
+});
+
+test('a malformed claim record blocks instead of being skipped', async () => {
+  const result = await reconcileSessionLifecycle(options({
+    providerClient: {
+      findSourceForRepository: async () => ({ name: sourceName, githubRepo: { owner: 'owner', repo: 'repo' } }),
+      listSessions: async () => []
+    },
+    stateAdapter: {
+      readState: async () => ({ head: 'a'.repeat(40), claims: [{ claimId: 'incomplete' }] })
+    }
+  }));
+  assert.equal(result.success, false);
+  assert.equal(result.decisionCode, 'RECONCILIATION_STATE_INVALID');
+  assert.equal(result.blockers[0].code, 'BLOCK_MALFORMED_CLAIM');
+});
