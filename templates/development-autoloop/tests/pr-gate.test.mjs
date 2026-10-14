@@ -154,6 +154,12 @@ test('an unchecked acceptance criterion blocks the handoff', () => {
   const result = evaluatePullRequestGate(scenario);
   assert.ok(result.blockers.some(item => item.code === 'ACCEPTANCE_CRITERION_NOT_CONFIRMED'));
 });
+test('a criterion without a completion checkbox is not assumed complete', () => {
+  const scenario = input();
+  scenario.pullRequest.body = scenario.pullRequest.body.replace('- [x] Criterion:', '- Criterion:');
+  const result = evaluatePullRequestGate(scenario);
+  assert.ok(result.blockers.some(item => item.code === 'ACCEPTANCE_CRITERION_NOT_CONFIRMED'));
+});
 test('empty acceptance evidence blocks the handoff', () => {
   const scenario = input();
   scenario.pullRequest.body = scenario.pullRequest.body.replace('Evidence: tests/pr-gate.test.mjs covers a mismatched head SHA.', 'Evidence:');

@@ -95,7 +95,7 @@ function checkAcceptanceEvidence(section, addBlocker) {
       if (current) criteria.push(current);
       current = checked
         ? { checked: checked[1].toLowerCase() === 'x', text: checked[2].trim(), evidence: null }
-        : { checked: true, text: plain[1].trim(), evidence: null };
+        : { checked: false, text: plain[1].trim(), evidence: null };
       continue;
     }
     if (current) {
