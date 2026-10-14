@@ -416,8 +416,18 @@ export async function reconcileSessionLifecycle({
       continue;
     }
 
-    const prRef = findSessionPullRequest(session);
-    if (!prRef || typeof prRef.url !== 'string' || !prRef.url.trim()) {
+    const prEvidence = sessionPullRequestRefs(session);
+    if (prEvidence.invalid) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_MALFORMED_PR_OUTPUT',
+        reason: 'Session contains malformed pull request output; linked PR evidence cannot be trusted.'
+      });
+      continue;
+    }
+    if (prEvidence.refs.length === 0) {
       blockers.push({
         session: id,
         claimId,
@@ -428,6 +438,17 @@ export async function reconcileSessionLifecycle({
       });
       continue;
     }
+    if (prEvidence.refs.length !== 1) {
+      blockers.push({
+        session: id,
+        claimId,
+        issueNumber: claim.issueNumber,
+        code: 'BLOCK_MULTIPLE_LINKED_PRS',
+        reason: 'Session references multiple pull requests; a human must classify the work before reconciliation can clear.'
+      });
+      continue;
+    }
+    const prRef = prEvidence.refs[0];
     if (!pullRequestUrlMatchesRepository(prRef.url, expectedRepo)) {
       blockers.push({
         session: id,
