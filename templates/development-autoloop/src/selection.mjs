@@ -439,7 +439,8 @@ export function selectCandidateIssue(snapshot, configInput) {
       globalActiveWorkBlockers.push({ issueNumber: null, code: 'BLOCK_AMBIGUOUS_ACTIVE_WORK', reason: 'Snapshot contains a non-object claim record.' });
       continue;
     }
-    if (c.reconciled !== true) {
+    const isReconciled = c.reconciled === true || c.reconciliationStatus === 'RECONCILED';
+    if (!isReconciled) {
       const claimId = typeof c.claimId === 'string' && c.claimId.trim() ? c.claimId : null;
       const claimIssue = Number(c.issueNumber ?? c.issue_number);
       if (!claimId && (!Number.isInteger(claimIssue) || claimIssue < 1)) {
@@ -462,7 +463,7 @@ export function selectCandidateIssue(snapshot, configInput) {
 
   const unresolvedPRs = pullRequests.filter((pr) => pr && typeof pr === 'object' && !isMergedPR(pr));
   const activeSessions = sessions.filter((s) => s && typeof s === 'object' && sessionDisposition(s).disposition === 'blocking');
-  const activeClaims = claims.filter((c) => c && typeof c === 'object' && c.reconciled !== true);
+  const activeClaims = claims.filter((c) => c && typeof c === 'object' && c.reconciled !== true && c.reconciliationStatus !== 'RECONCILED');
 
   const readyLabel = config.labels.ready;
 

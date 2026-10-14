@@ -17,10 +17,18 @@ jobs:
   reconcile:
     name: Reconcile Jules sessions (read-only)
     runs-on: ubuntu-latest
+    environment: autoloop-dispatch
     timeout-minutes: 5
     steps:
+      - name: Verify default branch ref
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          echo "::error::Session reconciliation can only be executed from the repository default branch."
+          exit 1
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
