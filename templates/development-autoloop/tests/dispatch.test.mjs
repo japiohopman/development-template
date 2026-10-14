@@ -13,6 +13,7 @@ function sampleConfig(overrides = {}) {
   return {
     schemaVersion: 1,
     enabled: true,
+    repairDispatchEnabled: false,
     defaultBranch: 'main',
     runMode: 'live',
     workProvider: 'jules',
