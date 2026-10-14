@@ -5,7 +5,7 @@ import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.
 import { reconcileSessionLifecycle } from '../src/reconciliation.mjs';
 import { extractGoverningIssueNumber } from '../src/pr-gate.mjs';
 import { JulesClient } from '../src/jules.mjs';
-import { evaluateReviewRelay } from '../src/review-relay.mjs';
+import { evaluateReviewRelay, parseEscalationDirective } from '../src/review-relay.mjs';
 
 const repositoryValue = process.env.GITHUB_REPOSITORY;
 const token = process.env.GITHUB_TOKEN;
@@ -151,7 +151,7 @@ async function run() {
 
   // pull_request_review uses a PR merge ref. This privileged runner deliberately
   // refuses that trigger: review decisions must be re-read on default-branch code
-  // after a trusted reviewer posts [autoloop:relay-review] on the PR.
+  // after the no-secret observer completes or a trusted reviewer requests a retry.
   if (eventName === 'pull_request_review') {
     fail('BLOCK_UNTRUSTED_EVENT_ROUTE',
       'Privileged review relay cannot run directly on pull_request_review merge refs.',
@@ -200,7 +200,8 @@ async function run() {
       if (relayReviewRequested) {
         const trustedReviews = reviews.filter(item =>
           config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())
-          && ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(String(item?.state || '').toUpperCase()));
+          && (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(String(item?.state || '').toUpperCase())
+            || (String(item?.state || '').toUpperCase() === 'COMMENTED' && parseEscalationDirective(item?.body))));
         const currentHeadReviews = trustedReviews.filter(item => String(item?.commit_id || '').toLowerCase() === currentHead.toLowerCase());
         const eligibleReviews = currentHeadReviews.length ? currentHeadReviews : trustedReviews;
         eligibleReviews.sort((a, b) => {
@@ -443,8 +444,15 @@ async function run() {
       return;
     }
     const matches = new Map();
+    // These codes are emitted only after reconciliation verifies the PR identity
+    // and its governing Issue link. Identifiers on lookup failures are not proof.
+    const correlatedBlockerCodes = new Set([
+      'BLOCK_MERGED_PR_ISSUE_NOT_COMPLETED', 'BLOCK_CLAIM_REQUIRES_RECONCILIATION',
+      'BLOCK_OPEN_PR', 'BLOCK_CLOSED_UNMERGED_PR', 'BLOCK_UNKNOWN_PR_STATE', 'BLOCK_ACTIVE_PROVIDER_SESSION'
+    ]);
     for (const blocker of reconciliation?.blockers || []) {
-      if (Number(blocker.pullRequest) !== prNumber || Number(blocker.issueNumber) !== Number(governing.number)
+      if (!correlatedBlockerCodes.has(blocker.code)
+        || Number(blocker.pullRequest) !== prNumber || Number(blocker.issueNumber) !== Number(governing.number)
         || !blocker.claimId || !blocker.session) continue;
       const key = String(blocker.claimId) + '|' + String(blocker.session);
       matches.set(key, { claimId: String(blocker.claimId), sessionId: String(blocker.session),
@@ -463,7 +471,7 @@ async function run() {
     const keys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\s]+) -->/g)].map(match => match[1]));
     decision = evaluateReviewRelay({
       repositoryFullName: repositoryValue, pullRequest, eventName: decisionEventName, eventAction: decisionEventAction,
-      eventReview, eventComment: commentEvent, reviews,
+      eventReview: reviewEvent, eventComment: commentEvent, reviews,
       trustedReviewers: config.trustedReviewers, requiredChecks: config.requiredChecks, checkRuns,
       governingIssueNumber: governing.number, existingWork, existingEventKeys: keys
     });
@@ -500,7 +508,8 @@ async function run() {
     }
     return;
   }
-  if (decision.decisionCode !== 'DUPLICATE_EVENT_IGNORED') {
+  if (decision.decisionCode !== 'DUPLICATE_EVENT_IGNORED'
+    && (relayReviewRequested || isHeadSync || decision.decisionCode === 'ESCALATION_RECORDED')) {
     try {
       decision = await publishDecisionCheck(decision);
     } catch (error) {

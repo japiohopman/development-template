@@ -3,7 +3,7 @@
  * This module never calls GitHub/Jules and never creates sessions.
  */
 const SHA1_PATTERN = /^[0-9a-f]{40}$/i;
-const REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']);
+const REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 function text(value) { return typeof value === 'string' ? value.trim() : ''; }
 function lower(value) { return text(value).toLowerCase(); }
 function safeIdentifier(value) {
@@ -247,8 +247,7 @@ export function evaluateReviewRelay({
 
   const approvals = latest.filter(item => text(item.state).toUpperCase() === 'APPROVED');
   if (approvals.length === 0) {
-    const currentComments = latest.filter(item => text(item.state).toUpperCase() === 'COMMENTED');
-    if (currentComments.length > 0 || state === 'DISMISSED') return result('ACKNOWLEDGEMENT_IGNORED',
+    if (state === 'DISMISSED') return result('ACKNOWLEDGEMENT_IGNORED',
       'No active trusted approval or changes-requested verdict exists on the current head.',
       'Comments and dismissed reviews are not verdicts. Wait for a current-head trusted review.', common);
     const stale = (Array.isArray(reviews) ? reviews : []).some(item => trusted(item?.user?.login, trustedReviewers)

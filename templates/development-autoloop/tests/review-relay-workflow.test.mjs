@@ -25,6 +25,9 @@ test('review relay checks out trusted default-branch code and uses the protected
   assert.match(workflow, /environment:\s*autoloop-dispatch/);
   assert.match(workflow, /ref:\s*\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}/);
   assert.match(workflow, /persist-credentials:\s*false/);
+  for (const action of ['checkout', 'setup-node']) {
+    assert.match(workflow, new RegExp('uses: actions/' + action + '@[0-9a-f]{40} # v4\\.[0-9]+\\.[0-9]+'));
+  }
 });
 
 test('review relay permissions are minimal for its managed per-head check and audit comments', () => {

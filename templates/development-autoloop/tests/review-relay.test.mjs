@@ -136,6 +136,16 @@ test('latest unresolved changes-requested review takes precedence over a same-he
   assert.match(result.commentBody, /review:800/);
 });
 
+test('a later COMMENTED review cannot replace an unresolved changes-requested verdict', () => {
+  const request = review(820, 'maintainer-bot', 'CHANGES_REQUESTED', head, '2026-10-14T12:01:00Z');
+  const comment = review(821, 'maintainer-bot', 'COMMENTED', head, '2026-10-14T12:02:00Z', 'Thanks for the update.');
+  const approval = review(822, 'trusted-reviewer', 'APPROVED', head, '2026-10-14T12:03:00Z');
+  const result = evaluate({ eventReview: approval, reviews: [request, comment, approval] });
+  assert.equal(result.decisionCode, 'REPAIR_HANDOFF_BLOCKED');
+  assert.equal(result.reviewId, request.id);
+  assert.equal(result.requiresWrite, true);
+});
+
 test('closed or malformed pull request context blocks closed', () => {
   assert.equal(evaluate({ pullRequest: { ...pr, state: 'closed' } }).decisionCode, 'BLOCK_INVALID_PR_CONTEXT');
   assert.equal(evaluate({ pullRequest: { ...pr, head: { sha: 'bad' } } }).decisionCode, 'BLOCK_INVALID_PR_CONTEXT');
