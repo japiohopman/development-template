@@ -39,7 +39,7 @@ function mockSource(scenario) {
     "  if (/^\\/check-runs\\/\\d+$/.test(path) && options.method === 'PATCH') return response({ id: Number(path.split('/').pop()) });",
     "  if (options.method && options.method !== 'GET') throw new Error('Unexpected write in mocked approval path: ' + options.method + ' ' + path);",
     "  if (path === '/pulls/17') return response(pullRequest);",
-    "  if (path === '/pulls/17/reviews') return response(scenario === 'no-review' ? [] : [trustedReview]);",
+    "  if (path === '/pulls/17/reviews') return response(scenario === 'no-review' ? [] : [scenario === 'dismissed-review' ? { ...trustedReview, state: 'DISMISSED' } : trustedReview]);",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
     "  if (path === '/issues/17/comments') return response([]);",
@@ -115,6 +115,13 @@ test('the secure workflow_run bridge automatically relays a review from the no-s
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
   assert.equal(result.report.checkConclusion, 'success');
+  assert.equal(result.report.mutated, true);
+});
+
+test('a dismissed trusted review leaves the current-head relay check action-required', t => {
+  const result = runRelay(t, 'dismissed-review', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.report.decisionCode, 'ACKNOWLEDGEMENT_IGNORED');
+  assert.equal(result.report.checkConclusion, 'action_required');
   assert.equal(result.report.mutated, true);
 });
 
