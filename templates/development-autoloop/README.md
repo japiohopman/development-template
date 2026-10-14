@@ -1,94 +1,105 @@
 # Development Autoloop
 
-A reusable set of building blocks for a careful Issue → coding agent → pull request → review workflow.
+## Purpose
 
-**Status: Foundation — not ready to run tasks automatically.**
+Development Autoloop is a reusable GitHub workflow for managing development tasks safely from start to finish:
 
-In plain language: some important parts have been built and tested, including the Jules adapter. But those parts are not yet connected to a working GitHub Actions workflow that chooses an Issue, gathers the latest GitHub information, and starts Jules. There is **no automatic task dispatcher in Actions yet**. A separate manual, read-only reconciliation workflow is included for consumer repositories after the template is installed.
+**discover an Issue → run preflight → reserve one task → dispatch to a coding agent → reconcile the session and PR → check PR evidence → relay trusted review feedback → safely continue or stop.**
 
-## What you will see in GitHub Actions
+The workflow is the coordinator. Code under src/ contains reusable decisions, code under scripts/ reads live data and calls those decisions, and workflows under .github/workflows/ decide when steps run and which permissions are available.
 
-In the main `development-template` repository, the active workflow is called **Template validation**. It is a checker, not a worker.
+**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The full automatic dispatcher and trusted review relay are not connected end to end, and the disposable consumer-repository pilot remains outstanding.
 
-Imagine we are building a robot:
-- The checker looks at the robot's parts and tests whether they behave as expected.
-- A dispatcher is the button and wiring that tells the robot which job to do.
-- We have the checker and several robot parts. The dispatcher and the full work-and-review loop still need to be connected.
+## A simple way to understand the parts
 
-### What does Template validation check?
+Imagine a workshop:
 
-The workflow lives at the repository root in [`.github/workflows/template-ci.yml`](../../.github/workflows/template-ci.yml). When relevant code or documentation changes, GitHub runs these steps:
+- GitHub Actions workflows are the schedule and safety rules for when a job may start.
+- Scripts are the workers that collect current facts from GitHub and the coding-agent service.
+- Source modules are the checklist: they decide whether the facts prove that a task is safe, blocked, or complete.
+- Tests try ordinary and tricky situations before the checklist is trusted on real work.
 
-1. **Set up:** GitHub downloads the version of the code it is checking and starts Node.js 20.
-2. **Syntax checks (`npm run check`):** Node.js checks that the listed code files are written in a form it can read. This catches certain typing and syntax mistakes. It does not prove the whole system works.
-3. **Unit tests (`npm test`):** small automatic tests try lots of situations and check the answers. For example, they test whether unclear or unsafe situations are blocked.
-4. **Report:** GitHub marks the run green if both steps pass, or red if a step fails.
+The source code should not be mistaken for a running workflow. Each step must be connected to a workflow, use trusted inputs, and explain the result to the person responsible.
 
-Some tests pretend to be the Jules service by returning made-up test responses. These are called **mocks**. This lets us test timeouts, errors, and successful replies without using a real API key or creating a real Jules session.
-
-A green check means only this: **the syntax checks and automated tests passed on the exact commit being checked.** It does not mean that Jules was given work, a PR was reviewed, or the entire loop was tested from start to finish.
-
-The files inside `.github/workflows/` in this template folder are examples that travel with the template. GitHub does not run those nested files in this catalog repository; the active checker here is the root workflow linked above. After copying the template into a consumer repository, `reconcile-readonly.yml` provides a **manual, read-only** inventory check; it does not dispatch Jules or change GitHub state.
-
-## What has been built so far?
+## What works today?
 
 | Part | In everyday words | Current state |
 | --- | --- | --- |
-| Configuration checks | Make sure the settings follow the agreed rules. | Built and tested |
-| Issue and PR contracts | Check that an Issue or PR contains the information we require. | Built and tested |
-| Issue selection | Choose one safe next Issue from a complete set of GitHub information. If the choice is unclear, stop instead of guessing. | Built and tested; decision logic only |
-| Durable claim | Put a reservation on the Issue so a second run does not start the same work at the same time. | Built and tested |
-| Jules adapter and dispatch code | The code knows how to validate a task, find the right Jules source, request a session, and handle uncertain responses carefully. | Code exists; no Actions runner calls it yet |
-| Session / Issue / branch / PR reconciliation | Compare the task Jules says it is doing with the actual Issue, branch, and PR in GitHub. | Built and tested; review-gated |
-| PR contract gate | Check that a PR has the required information and evidence for its exact latest commit. | Not built yet |
-| Review relay | Turn a trusted review into a safe next step, and send requested fixes back to the existing work instead of starting duplicates. | Not built yet |
-| Full loop and pilot | Test the whole process in a separate, disposable repository before relying on it. | Not built yet |
+| Configuration and contracts | Check that settings and Issues/PRs contain the required information. | Built and tested |
+| Preflight and selection | Look for existing work and choose only one eligible Issue from a complete snapshot. | Decision logic built and tested |
+| Durable claim | Reserve an Issue so competing runs do not knowingly start the same task. | Built and tested |
+| Provider adapter and dispatch logic | Prepare and validate a task packet for Jules and handle uncertain results carefully. | Logic exists; not wired to a live Actions dispatcher |
+| Session/Issue/branch/PR reconciliation | Compare provider sessions with real GitHub Issues, branches, PRs, and claims. | Read-only reconciliation built; consumer workflow is manual-only |
+| PR contract gate | Verify current-head evidence, changed paths, configured required checks, and handoff completeness. | Implemented in the Issue #7 draft; requires review and consumer configuration |
+| Trusted review relay | Turn trusted approve/changes-requested decisions into safe, non-duplicated next steps. | Not built |
+| Complete loop and pilot | Test all steps together in a separate disposable repository. | Not built |
 
-Follow the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the order of work. The key remaining milestones are [Issue #6: reconcile sessions and PRs](https://github.com/japiohopman/development-template/issues/6), [Issue #7: PR contract gate](https://github.com/japiohopman/development-template/issues/7), [Issue #8: review relay](https://github.com/japiohopman/development-template/issues/8), and [Issue #9: end-to-end tests and pilot](https://github.com/japiohopman/development-template/issues/9).
+See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining sequence.
 
-## A few words explained
+## Which workflow do I see in the catalog Actions tab?
 
-- **Preflight / safety check:** look around before doing anything, like checking that the road is clear before crossing.
-- **Snapshot:** one collected picture of the current Issues, claims, sessions, branches, and PRs.
-- **Claim:** a reservation that says, “this run owns this Issue for now.”
-- **Dispatch:** actually send an eligible Issue to Jules as a coding task.
-- **Reconciliation:** compare records with what really exists and fix or block disagreements.
-- **Fail closed:** when information is missing or confusing, stop safely instead of guessing.
-- **PR / pull request:** a proposal to add code changes to the main code. It is reviewed before being merged.
+In the main development-template repository, **Template validation** is the active workflow. It checks source-file syntax and runs unit tests. It is not the task dispatcher and does not create a Jules session.
 
-## How to run the tests yourself
+The workflows under this template's nested .github/workflows/ folder are examples for a consuming repository. GitHub does not run them from this nested directory. After installation, copy the template contents into the consumer repository so the workflow files live in .github/workflows/ at the repository root.
 
-You need Node.js 20 or newer.
+### PR contract gate
 
-1. Open a terminal in this folder: `templates/development-autoloop/`.
-2. Run `npm run check` to check the source files' syntax.
-3. Run `npm test` to run the automatic tests.
+The consumer workflow .github/workflows/pr-contract-gate.yml is deliberately read-only. It uses trusted base-branch code and GitHub metadata to check the PR's governing Issue, acceptance-criteria evidence, exact changed-file list, current head SHA, required checks, and whether the latest commit actually changes the file tree.
 
-These commands do not dispatch work to Jules.
+Its report separates:
+- **Contract:** is the Issue/PR handoff complete and supported by evidence?
+- **CI/checks:** did the configured required check runs finish successfully for this exact commit?
+- **Human review:** still separate and required; this gate never approves or merges.
 
-## Environment and secrets
+A green PR contract gate is not permission to dispatch Jules, merge a PR, or enable a schedule. If the event is stale, evidence is missing, checks have not finished, or configuration is incomplete, the gate blocks and explains the next safe action.
 
-**You do not need to add a Jules API key for the current validation workflow.**
+## Install and configure in a consuming repository
 
-The template's automated validation tests do not need a Jules API key. The separate manual `reconcile-readonly.yml` workflow does require a repository Actions secret named `JULES_API_KEY` after you install the template into a consumer repository, because it reads the provider's session inventory. It has read-only GitHub permissions and does not dispatch or create sessions. The actual dispatch workflow is still not connected.
+1. Copy the contents of templates/development-autoloop/ into the root of the repository that will use the template. Do not leave the workflows nested one level too deep.
+2. Copy config/autoloop.example.json to config/autoloop.json.
+3. Keep live dispatch disabled and automatic merge disabled. Configure requiredChecks with the exact check-run names the consumer repository requires. An empty list deliberately produces “not configured”, not “CI passed”.
+4. Review the permissions and workflow files before enabling any workflow in that repository.
+5. Run syntax/unit tests, inspect the gate report, and follow Issue #9's disposable-repository pilot plan before treating the complete workflow as operational.
 
-GitHub provides `GITHUB_TOKEN` to Actions automatically. Its permissions still need to be kept as small as possible. Secrets must never be committed to configuration files, source code, test fixtures, Issues, PR comments, or logs.
+The configuration is project-neutral. Do not add product-specific assumptions to the shared decision modules.
 
-The read-only reconciliation workflow also reads the claim ledger from the `autoloop-state` branch by default. Set the Actions repository variable `AUTOLOOP_STATE_BRANCH` only if your consumer repository uses a different dedicated state branch. Missing/uninitialized state is a blocker, never an empty ledger. Secrets and Environment settings do not copy over automatically when a repository is created from a template; configure them separately in a project that actually needs them.
+## Consuming-repository Environment and secrets setup
 
-## Safety rules
+The catalog repository's settings and secrets do **not** copy into a consuming repository.
 
-- Keep dispatch disabled by default until the complete workflow has passed the planned checks.
-- Require exact authorization at the dispatch boundary.
-- Never start another task when the old session or PR may still be active.
-- Do not assume a failed or timed-out request means that Jules did not receive it. Check first; do not blindly retry session creation.
-- Missing data, unknown states, or failed API calls must block work rather than look like an empty work queue.
-- A green test run does not approve a PR.
-- A review approval applies only to the exact PR commit that was reviewed; a new commit needs a new review.
+- **PR contract gate:** no custom secret is required. GitHub supplies GITHUB_TOKEN to Actions, and this workflow needs only read permissions for repository contents, Issues, pull requests, and check runs.
+- **Manual read-only session reconciliation:** set a repository Actions secret named JULES_API_KEY only if you install and use reconcile-readonly.yml, because that workflow reads the provider's session inventory. Do not put the key in a configuration file, source code, test fixture, Issue, PR body, or log.
+- **GitHub Environment:** the current template workflows do not declare an environment. No named Environment is used by these workflows. Therefore, a secret belongs in the repository's Actions secrets unless the workflow is deliberately changed to reference an Environment and that change is reviewed.
+
+AUTOLOOP_STATE_BRANCH is an optional repository variable for the manual reconciliation workflow. It defaults to autoloop-state. Missing or uninitialized claim state is a blocker, not an empty queue.
+
+## Run the tests in the template folder
+
+You need Node.js 20 or newer. From templates/development-autoloop/:
+
+- npm run check checks that listed source and script files have readable JavaScript syntax.
+- npm test runs the automated behavior and security-boundary tests.
+
+These commands use local fixtures and mocked responses. They do not call Jules or create external sessions.
+
+## Important terms
+
+- **Preflight:** check for existing tasks, claims, sessions, and pull requests before starting anything new.
+- **Claim:** a reservation that says which run currently owns an Issue.
+- **Dispatch:** actually send an eligible Issue to Jules as a task.
+- **Reconciliation:** compare what the coding-agent service says with the state that really exists in GitHub.
+- **Exact head SHA:** the unique identifier of the current PR commit. Evidence for an older commit must not count for a newer one.
+- **Fail closed:** missing, conflicting, or unknown information stops the workflow instead of being guessed.
+- **No-op commit:** a new commit record whose file tree is identical to its parent, so it does not represent a real change.
+
+## Safety and recovery
+
+- Live and scheduled dispatch stay disabled until the complete safety plan and disposable pilot pass.
+- Never start another task when previous work may still be active.
+- Do not blindly retry a timed-out provider request; reconcile the outcome first.
+- A green test/check run does not approve a PR.
+- A new commit invalidates evidence and approval tied to an older head.
 - Human approval remains required for merging by default.
+- If an installed workflow behaves unexpectedly, disable that workflow first. The PR contract gate is read-only, so it does not require a state rollback.
 
-## Recovery and next steps
-
-Read [Architecture](docs/ARCHITECTURE.md), [Implementation plan](docs/IMPLEMENTATION_PLAN.md), and [Recovery and operations](docs/RECOVERY.md) for the detailed rules.
-
-The goal is to make normal work require very little attention from you. If the system reaches a genuine problem, it must explain what happened, what it changed (if anything), and the next safe action. It must not hide the problem in an endless retry loop.
+The desired normal experience is that you need to do very little. If the system reaches a real problem, it must explain what happened, whether anything changed, and the next safe action—without hiding the problem in an endless retry loop.

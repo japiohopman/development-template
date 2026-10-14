@@ -1,87 +1,93 @@
 # Development Templates
 
-Reusable development templates maintained in one neutral repository.
+## Purpose: reusable automatic development workflows
 
-This repository is a **catalog of building blocks**, not one finished automation system. Each template lives in its own folder under `templates/` and explains what is ready, what is not ready, and how to use it.
+This repository is a catalog of reusable templates. The main product we are building is the Development Autoloop: a safe, reusable GitHub workflow that can discover work, check whether it is safe to start, hand one task to a coding agent such as Jules, follow that task through a pull request, relay review feedback, and stop safely when something is unclear.
+
+The goal is not to create a pile of JavaScript helpers. A working installation must connect the helpers to GitHub Actions workflows in the consuming repository.
+
+## The intended loop
+
+1. Discover an Issue. Read current Issues, labels, dependencies, and repository rules. Never assume an incomplete API response means there is no work.
+2. Run preflight. Check whether another session, pull request, or claim already represents the work. Stop if anything is missing or ambiguous.
+3. Select and reserve one Issue. Choose one eligible task, then record a durable claim so another run cannot unknowingly start the same task.
+4. Dispatch the task. Only after the configured safety and human-readiness gates pass, the dispatcher may send the task to Jules.
+5. Reconcile reality. Compare the provider's session with the actual Issue, branch, pull request, and claim in GitHub.
+6. Check the PR handoff. Verify the governing Issue, acceptance evidence, changed paths, required checks, and exact current PR head SHA.
+7. Relay review feedback. A trusted reviewer decision should route repairs back to the existing work rather than create duplicate tasks.
+8. Explain the outcome. Every block should say what happened, whether state changed, and what the next safe action is.
+
+The template is not ready for unattended use until the full loop has been tested in a separate disposable repository.
 
 ## Available templates
 
 | Template | Status | Purpose |
 | --- | --- | --- |
-| [Development Autoloop](templates/development-autoloop/README.md) | Foundation — not live-enabled | Building blocks for a careful Issue → coding agent → pull request → review workflow. The automatic dispatch button/runner and the full review loop are not wired up yet. |
+| Development Autoloop | Foundation — not live-enabled | Reusable building blocks and consumer workflows for an Issue → coding agent → PR → review cycle. The automatic dispatcher and complete review relay are not yet connected end to end. |
 
-## First: what does “Template validation” mean?
+See the [Development Autoloop README](templates/development-autoloop/README.md).
 
-When you see **Template validation** in the GitHub **Actions** tab, that is a code checker. It is **not** the system that gives work to Jules.
+## Why are there many files under src/?
 
-Think of it like checking a bicycle before a ride:
-- **Syntax checks** make sure the source files are written in a form Node.js can read.
-- **Unit tests** run small automatic tests to see whether the code makes the expected decisions.
-- Some Jules API tests use pretend replies (mocks), so the tests do not create real Jules sessions.
+Each layer has a separate responsibility:
 
-The current workflow is defined in [`.github/workflows/template-ci.yml`](.github/workflows/template-ci.yml). It:
-1. Downloads the exact version of the repository being checked.
-2. Starts Node.js 20.
-3. Runs `npm run check` inside `templates/development-autoloop/`.
-4. Runs `npm test` in the same folder.
+- The workflows under .github/workflows/ decide when GitHub should run a step and which permissions it receives.
+- Scripts gather real information from GitHub or an external provider and pass it to the decision code.
+- Source modules under src/ contain the rules that decide whether work is eligible, blocked, complete, or ready for human review. They should be testable without live API calls.
+- Tests under tests/ check normal behavior and dangerous edge cases.
 
-A green result means **these syntax checks and tests passed for that commit**. It does **not** mean Jules has started a task, a pull request has been reviewed, or the full automation loop works.
+A source module alone is not an automatic workflow. It must be invoked by the appropriate workflow and runner. A workflow should not contain a second, unrelated copy of the same decision rules.
 
-### Why does it run?
+## What runs in this catalog repository today?
 
-GitHub starts this checker when relevant files are pushed or a pull request is opened/updated. You can also start it manually from **Actions → Template validation → Run workflow**. It has no schedule.
+The active workflow in the main development-template repository is **Template validation**. It is a code checker, not the Jules dispatcher.
 
-Sometimes you may see a run for the push and another for the pull request. Those are two separate GitHub events checking the same code. That is normal.
+The workflow is defined in [.github/workflows/template-ci.yml](.github/workflows/template-ci.yml). It checks out the commit being tested, starts Node.js, checks JavaScript syntax, and runs the unit tests. Some tests use pretend provider replies, so ordinary CI does not create Jules sessions.
 
-The workflow only has permission to read repository contents. It does not dispatch work, create Jules sessions, change Issues or PR labels, merge PRs, or run on a timer.
+A green result means only that the syntax checks and tests passed for that exact commit. It does not mean Jules was given a task, a consumer workflow is installed, a PR was approved, or the complete automatic loop has passed a pilot.
 
-## What is “dispatch”?
+Workflow files stored under templates/development-autoloop/.github/workflows/ are template files. GitHub does not run those files while they are nested inside this catalog. They become active only after installation into a consuming repository, with the workflow files at that repository's root .github/workflows/ directory.
 
-**Dispatch means actually handing a selected Issue to Jules as a coding task.**
+## Current state and next steps
 
-The Development Autoloop folder now contains the selection logic, durable claim code, and a Jules adapter. However, there is not yet a GitHub Actions workflow or executable runner connected to those parts that gathers the live GitHub information and calls the dispatch function. So there is currently **no working “start the next Issue” button in Actions**.
+The template has tested logic for configuration, contracts, selection, durable claims, provider dispatch, and session/Issue/branch/PR reconciliation. The PR contract gate is being added as its own read-only gate. The full dispatcher is not yet connected to an active Actions runner, and the trusted review relay plus a complete disposable-repository pilot remain future work.
 
-The next steps are to connect these building blocks safely, check the live Issue/session/branch/PR state, add the PR contract gate and review relay, and test the complete loop in a separate disposable repository. See the [Development Autoloop README](templates/development-autoloop/README.md) and its [implementation plan](templates/development-autoloop/docs/IMPLEMENTATION_PLAN.md).
+Follow the template's [architecture](templates/development-autoloop/docs/ARCHITECTURE.md), [implementation plan](templates/development-autoloop/docs/IMPLEMENTATION_PLAN.md), [recovery notes](templates/development-autoloop/docs/RECOVERY.md), and [template standards](docs/TEMPLATE_STANDARDS.md).
 
 ## Design principles
 
-- **Reusable by default:** no project-specific business rules in shared logic.
-- **Configuration over forks:** each project supplies its own labels, branch names, required checks, and policy settings.
-- **Fail safely:** missing data, unknown states, conflicting claims, or unfinished work must stop the automation rather than guess.
-- **Human control:** automatic dispatch must be deliberately enabled; merging stays a human decision by default.
-- **Keep secrets private:** API keys belong in the consuming repository's secret settings, never in code, tests, README files, Issues, or PR comments.
+- Reusable by default: no product-specific business rules in shared logic.
+- Configuration over forks: each project supplies its own labels, branch names, required checks, and policy settings.
+- Fail safely: missing data, unknown states, conflicting claims, partial pages, or failed API calls stop the automation rather than trigger a guess.
+- Workflow-first: Actions orchestrates; scripts gather evidence; source modules decide; tests prove behavior.
+- Human control: live dispatch must be deliberately enabled; human merge approval remains the default.
+- Keep secrets private: API keys belong in the consuming repository's secret settings, never in code, tests, README files, Issues, PR comments, or logs.
 
 ## Repository layout
 
-```text
-templates/
-  development-autoloop/
-    .github/   # Files that travel with a copied template
-    config/    # Example settings and their rules
-    docs/      # Architecture, roadmap, and recovery notes
-    src/       # The actual code
-    tests/     # Automatic checks for the code
-docs/
-  TEMPLATE_STANDARDS.md
-.github/
-  workflows/
-    template-ci.yml  # The checker that runs in this repository
-```
+- .github/workflows/template-ci.yml — checks the template source in this catalog repository.
+- templates/development-autoloop/.github/ — workflows and a PR template copied into a consuming repository.
+- templates/development-autoloop/config/ — example settings and the configuration schema.
+- templates/development-autoloop/docs/ — architecture, roadmap, recovery, and setup instructions.
+- templates/development-autoloop/scripts/ — adapters that read real provider/GitHub data.
+- templates/development-autoloop/src/ — reusable decision rules.
+- templates/development-autoloop/tests/ — automatic checks for rules and workflow safety.
+- docs/TEMPLATE_STANDARDS.md — the required standard for reusable templates.
 
 ## Adding a template
 
-1. Create a dedicated directory under `templates/<template-name>/`.
-2. Add a README using plain language to explain the purpose, current readiness, setup, risks, and removal/recovery steps.
-3. Keep project settings in an example configuration and do not include secrets.
+1. Create a dedicated directory under templates/<template-name>/.
+2. Document the real purpose, maturity, setup, permissions, risks, and recovery in plain language.
+3. Keep project settings in configuration and never include secret values.
 4. Add automatic tests for safety-critical decisions.
-5. Try the template in a disposable test repository before declaring it ready for reuse.
-6. Update this catalog only when the template's status is clear.
+5. Install the template in a disposable consumer repository and test it before declaring it ready for reuse.
+6. Update the catalog status only when the evidence supports it.
 
 ## Status vocabulary
 
-- **Design:** the plan is being worked out; do not install it yet.
-- **Foundation:** useful parts exist and tests may pass, but the full workflow is not ready for unattended use.
-- **Ready for pilot:** setup and safety checks are complete; test it in a disposable repository first.
-- **Stable:** a successful pilot was completed and recovery steps are documented.
+- Design: the plan is being worked out; do not install it yet.
+- Foundation: useful parts exist and tests may pass, but the complete workflow is not ready for unattended use.
+- Ready for pilot: setup and safety checks are complete; test it in a disposable repository first.
+- Stable: a successful pilot was completed and recovery steps are documented.
 
-A green validation check is useful evidence, but it is not proof that a template is ready to run by itself.
+A green validation check is useful evidence, not proof that a template is ready to run by itself.
