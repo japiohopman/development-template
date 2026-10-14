@@ -48,7 +48,7 @@ if (!repositoryValue || !token || !julesApiKey) {
           throw new Error('Claim state branch has no authoritative commit SHA.');
         }
         const file = await api('/repos/' + repo.owner + '/' + repo.repo
-          + '/contents/claims.json?ref=' + encodeURIComponent(stateBranch));
+          + '/contents/claims.json?ref=' + encodeURIComponent(head));
         if (file?.encoding !== 'base64' || typeof file.content !== 'string') {
           throw new Error('Claim state file is missing or not base64-encoded.');
         }
