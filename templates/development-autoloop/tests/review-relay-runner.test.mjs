@@ -34,10 +34,13 @@ function mockSource(scenario) {
     '  const url = new URL(String(input));',
     "  if (url.hostname === 'jules.googleapis.com') throw new Error('Unexpected provider call in approval test.');",
     "  if (url.hostname !== 'api.github.com') throw new Error('Unexpected host.');",
-    "  if (options.method && options.method !== 'GET') throw new Error('Only GET requests expected in approval test.');",
+    "  if (path === '/check-runs' && options.method === 'POST') return response({ id: 909 }, 201);",
+    "  if (/^\\/check-runs\\/\\d+$/.test(path) && options.method === 'PATCH') return response({ id: Number(path.split('/').pop()) });",
+    "  if (options.method && options.method !== 'GET') throw new Error('Unexpected write in mocked approval path: ' + options.method + ' ' + path);",
     "  const path = url.pathname.replace('/repos/example/project', '');",
     "  if (path === '/pulls/17') return response(pullRequest);",
     "  if (path === '/pulls/17/reviews') return response(scenario === 'no-review' ? [] : [trustedReview]);",
+    "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
     "  if (path === '/issues/17/comments') return response([]);",
     "  return response({ message: 'Not Found' }, 404);",
@@ -90,21 +93,25 @@ test('trusted relay command re-reads current-head approval and exact-head requir
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
   assert.equal(result.report.reviewedHeadSha, head);
-  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.mutated, true);
+  assert.equal(result.report.decisionCheckName, 'Autoloop trusted review relay');
+  assert.equal(result.report.checkConclusion, 'success');
   assert.equal(result.report.requiresWrite, false);
 });
 
 test('relay command blocks when no trusted review is available', t => {
   const result = runRelay(t, 'no-review');
   assert.equal(result.report.decisionCode, 'WAITING_FOR_TRUSTED_REVIEW');
-  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.mutated, true);
+  assert.equal(result.report.checkConclusion, 'action_required');
   assert.equal(result.report.requiresWrite, false);
 });
 
 test('relay command blocks when the current-head required check fails', t => {
   const result = runRelay(t, 'failed-check');
   assert.equal(result.report.decisionCode, 'BLOCK_REQUIRED_CHECKS');
-  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.mutated, true);
+  assert.equal(result.report.checkConclusion, 'action_required');
 });
 
 test('an untrusted actor cannot request the privileged relay', t => {
