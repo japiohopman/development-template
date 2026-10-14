@@ -40,7 +40,7 @@ function mockSource(scenario) {
     "  const path = url.pathname.replace('/repos/example/project', '');",
     "  if (path === '/pulls/17') return response(pullRequest);",
     "  if (path === '/pulls/17/reviews') return response(scenario === 'no-review' ? [] : [trustedReview]);",
-    "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: [] });",
+    "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
     "  if (path === '/issues/17/comments') return response([]);",
     "  return response({ message: 'Not Found' }, 404);",
@@ -97,6 +97,14 @@ test('trusted relay command re-reads current-head approval and exact-head requir
   assert.equal(result.report.decisionCheckName, 'Autoloop trusted review relay');
   assert.equal(result.report.checkConclusion, 'success');
   assert.equal(result.report.requiresWrite, false);
+});
+
+test('relay updates its existing managed check run rather than creating duplicates', t => {
+  const result = runRelay(t, 'existing-check');
+  assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
+  assert.equal(result.report.decisionCheckRunId, 888);
+  assert.equal(result.report.checkConclusion, 'success');
+  assert.equal(result.report.mutated, true);
 });
 
 test('relay command blocks when no trusted review is available', t => {
