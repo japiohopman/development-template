@@ -287,7 +287,15 @@ export async function reconcileSessionLifecycle({
       });
       continue;
     }
-    if (sessionSource !== expectedSourceName) continue;
+    if (sessionSource !== expectedSourceName) {
+      if (/^sources\/github\/[^/]+\/[^/]+$/.test(sessionSource)) continue;
+      blockers.push({
+        session: session.name ?? session.id ?? 'unknown',
+        code: 'BLOCK_UNRECOGNIZED_SESSION_SOURCE',
+        reason: 'Session source does not match the target and is not a recognizable GitHub repository source; ownership cannot be proven.'
+      });
+      continue;
+    }
 
     const id = sessionIdOf(session);
     if (!id) {
