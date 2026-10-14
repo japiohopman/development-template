@@ -141,6 +141,27 @@ export class JulesClient {
       throw err;
     }
 
+    // SendMessageResponse and other successful Jules actions may have an empty body.
+    // Treat an empty 2xx body as accepted, but never swallow malformed non-empty JSON.
+    if (response.status === 204) return null;
+    if (typeof response.text === 'function') {
+      let bodyText;
+      try {
+        bodyText = await response.text();
+      } catch {
+        bodyText = null;
+      }
+      if (typeof bodyText === 'string') {
+        if (!bodyText.trim()) return null;
+        try {
+          return JSON.parse(bodyText);
+        } catch (err) {
+          const errRes = new Error('Failed to parse Jules API JSON response: ' + sanitizeJulesErrorMessage(err, this.apiKey));
+          errRes.code = 'JULES_MALFORMED_RESPONSE';
+          throw errRes;
+        }
+      }
+    }
     try {
       return await response.json();
     } catch (err) {
@@ -359,6 +380,28 @@ export class JulesClient {
    * @param {string} sessionId
    * @returns {Promise<object>}
    */
+  /**
+   * Send a follow-up to an existing active session. Callers must first verify
+   * repository/source, claim/session correlation, lifecycle state, and explicit
+   * pilot/config gates. This method never creates a session.
+   *
+   * Jules API: POST /v1alpha/sessions/{sessionId}:sendMessage
+   */
+  async sendMessage(sessionId, prompt) {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new Error('sessionId is required to send a Jules message.');
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('prompt is required to send a Jules message.');
+    }
+    const cleanId = sessionId.trim();
+    const response = await this._request(
+      '/v1alpha/sessions/' + encodeURIComponent(cleanId) + ':sendMessage',
+      { method: 'POST', body: { prompt: prompt.trim() } }
+    );
+    return { accepted: true, sessionId: cleanId, response };
+  }
+
   async getSession(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId.trim()) {
       throw new Error('sessionId is required.');
