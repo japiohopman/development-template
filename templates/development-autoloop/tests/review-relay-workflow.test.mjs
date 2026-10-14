@@ -45,3 +45,12 @@ test('template syntax validation covers the review relay module and runner', () 
   assert.match(packageJson.scripts.check, /src\/review-relay\.mjs/);
   assert.match(packageJson.scripts.check, /scripts\/review-relay\.mjs/);
 });
+
+test('Jules secret is exposed only after trusted current-head changes-requested classification', () => {
+  assert.match(workflow, /Classify whether existing-work verification needs provider access/);
+  assert.match(workflow, /trustedReviewers/);
+  assert.match(workflow, /review\.commit_id !== pr\.head\.sha/);
+  assert.match(workflow, /needs_jules=\x27 \+ String\(needsProvider\)/);
+  assert.match(workflow, /steps\.provider-access\.outputs\.needs_jules == \x27true\x27 && secrets\.JULES_API_KEY/);
+  assert.doesNotMatch(workflow, /^\s+JULES_API_KEY:\s*\$\{\{\s*secrets\.JULES_API_KEY\s*\}\}/m);
+});
