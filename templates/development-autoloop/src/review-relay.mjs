@@ -339,7 +339,7 @@ export function evaluateRepairContinuationGate({
     };
   }
   if (!existingWork || existingWork.verified !== true
-    || lower(existingWork.repositoryFullName || repository) !== repository
+    || lower(existingWork.repositoryFullName) !== repository
     || Number(existingWork.issueNumber) !== Number(governingIssueNumber)
     || Number(existingWork.pullRequestNumber) !== Number(pullRequest.number)
     || !text(existingWork.claimId) || !text(existingWork.sessionId)) {
@@ -351,7 +351,7 @@ export function evaluateRepairContinuationGate({
   }
   const sessionId = text(session?.id);
   const sourceName = text(session?.sourceContext?.source);
-  const sessionState = text(session?.normalizedState || normalizeJulesStateSafe(session?.state));
+  const sessionState = normalizeJulesStateSafe(session?.state);
   const sessionText = [session?.title, session?.prompt].filter(value => typeof value === 'string').join('\n');
   const claimMarker = '[claimId: ' + text(existingWork.claimId) + ']';
   if (sessionId !== text(existingWork.sessionId) || sourceName.toLowerCase() !== expectedSource.toLowerCase()
