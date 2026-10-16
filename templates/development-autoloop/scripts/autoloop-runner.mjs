@@ -156,6 +156,9 @@ async function run() {
       });
       const body = { ...params };
       for (const [, key] of match[2].matchAll(/\{([^}]+)\}/g)) delete body[key];
+      if (method === 'GET' && Object.keys(body).length > 0) {
+        path += '?' + new URLSearchParams(body).toString();
+      }
       const response = await fetch('https://api.github.com' + path, {
         method,
         redirect: 'error',
