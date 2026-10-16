@@ -154,7 +154,7 @@ async function run() {
         return encodeURIComponent(value);
       });
       const body = { ...params };
-      for (const key of ['owner', 'repo', 'ref', 'path', 'commit_sha']) delete body[key];
+      for (const [, key] of match[2].matchAll(/\\{([^}]+)\\}/g)) delete body[key];
       const response = await fetch('https://api.github.com' + path, {
         method,
         redirect: 'error',
