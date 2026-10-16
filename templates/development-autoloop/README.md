@@ -149,3 +149,9 @@ These commands use local fixtures and mocked responses. They do not call Jules o
 - If an installed workflow behaves unexpectedly, disable that workflow first. The PR contract gate is read-only, so it does not require a state rollback.
 
 The desired normal experience is that you need to do very little. If the system reaches a real problem, it must explain what happened, whether anything changed, and the next safe action—without hiding the problem in an endless retry loop.
+
+## CodeRabbit automatic reviews
+
+The repository-level `.coderabbit.yaml` enables automatic reviews and incremental reviews for ready-for-review pull requests, while excluding Draft pull requests until they are marked ready. The Development Autoloop template includes the same configuration at its root so it can be copied into a consuming repository.
+
+**This file configures preferences; it does not install or authorize the CodeRabbit GitHub App.** A repository owner must install/authorize the app, and account or organization policies may override these settings.
