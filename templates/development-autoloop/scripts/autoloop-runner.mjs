@@ -430,7 +430,8 @@ async function run() {
     evaluatedCandidates: selectionResult.evaluatedCandidates || [],
     nextAction: finalSuccess
       ? selectionResult.nextAction
-      : 'Resolve lifecycle reconciliation and candidate blockers before re-running autoloop dispatch.'
+      : 'Resolve lifecycle reconciliation and candidate blockers before re-running autoloop dispatch.',
+    runMode: liveDispatchRequested ? 'live' : 'plan-only'
   });
 
   printReport(report);
