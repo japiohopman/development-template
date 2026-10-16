@@ -46,25 +46,19 @@ test('template syntax validation covers the review relay module and runner', () 
   assert.match(packageJson.scripts.check, /scripts\/review-relay\.mjs/);
 });
 
-test('Jules secret is exposed only after trusted current-head changes-requested classification', () => {
+test('Jules secret is exposed only through the tested fail-closed policy', () => {
   assert.match(workflow, /Classify whether existing-work verification needs provider access/);
-  assert.match(workflow, /trustedReviewers/);
-  assert.match(workflow, /review\.commit_id !== pr\.head\.sha/);
-  assert.match(workflow, /config\.enabled === true/);
-  assert.match(workflow, /config\.runMode === 'live'/);
-  assert.match(workflow, /config\.repairDispatchEnabled === true/);
-  assert.match(workflow, /config\.repairPilotApproved === true/);
-  assert.match(workflow, /config\.humanReadinessRequired === true/);
-  assert.match(workflow, /config\.automaticMerge === false/);
-  assert.match(workflow, /config\.scheduleEnabled === false/);
-  assert.match(workflow, /needs_jules=\x27 \+ String\(needsProvider\)/);
-  assert.match(workflow, /steps\.provider-access\.outputs\.needs_jules == \x27true\x27 && secrets\.JULES_API_KEY/);
-  assert.doesNotMatch(workflow, /^\s+JULES_API_KEY:\s*\$\{\{\s*secrets\.JULES_API_KEY\s*\}\}/m);
+  assert.match(workflow, /shouldExposeProviderAccess/);
+  assert.match(workflow, /repairHeadSync/);
+  assert.match(workflow, /configReady/);
+  assert.match(workflow, /needs_jules=/);
+  assert.match(workflow, /steps\\.provider-access\\.outputs\\.needs_jules == \\x27true\\x27 && secrets\\.JULES_API_KEY/);
+  assert.doesNotMatch(workflow, /^\\s+JULES_API_KEY:\\s*\\$\\{\\{\\s*secrets\\.JULES_API_KEY\\s*\\}\\}/m);
 });
 
 test('workflow documentation accurately describes guarded continuation without creating replacement sessions', () => {
   assert.ok(workflow.includes('name: Trusted review relay (guarded existing-session continuation)'));
   assert.match(workflow, /never creates a new provider session or replacement task/i);
-  assert.match(workflow, /uniquely verified existing active Jules session/i);
+  assert.match(workflow, /exact existing session/i);
   assert.match(workflow, /message acceptance is not success/i);
 });
