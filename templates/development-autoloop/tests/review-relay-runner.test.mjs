@@ -45,7 +45,7 @@ function mockSource(scenario, writesPath) {
     'const check = ' + JSON.stringify(check) + ';',
     'const claim = ' + JSON.stringify(claim) + ';',
     'const source = ' + JSON.stringify(source) + ';',
-    'const session = ' + JSON.stringify({ ...session, state: ['repair-dispatch-completed', 'repair-dispatch-duplicate-completed'].includes(scenario) ? 'COMPLETED' : scenario === 'repair-dispatch-failed' ? 'FAILED' : 'IN_PROGRESS' }) + ';',
+    'const session = ' + JSON.stringify({ ...session, state: ['repair-dispatch-completed', 'repair-dispatch-duplicate-completed', 'repair-dispatch-outcome-approved'].includes(scenario) ? 'COMPLETED' : ['repair-dispatch-failed', 'repair-dispatch-outcome-failed'].includes(scenario) ? 'FAILED' : 'IN_PROGRESS' }) + ';',
     "const repair = scenario.startsWith('repair-');",
     "const verdict = repair ? { ...trustedReview, state: 'CHANGES_REQUESTED' } : trustedReview;",
     "const priorFinding = { ...trustedReview, id: 700, state: 'CHANGES_REQUESTED', commit_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', body: 'Please fix the contract.' };",
@@ -83,12 +83,12 @@ function mockSource(scenario, writesPath) {
     "    if (scenario === 'no-review') return response([]);",
     "    if (scenario === 'dismissed-review') return response([{ ...trustedReview, state: 'DISMISSED' }]);",
     "    if (scenario === 'comment-only') return response([comment]);",
-    "    if (scenario === 'repair-evidence-approved') return response([priorFinding, approvedRepair]);",
+    "    if (scenario === 'repair-evidence-approved' || scenario.startsWith('repair-dispatch-outcome-')) return response([priorFinding, approvedRepair]);",
     "    return response(scenario.endsWith('-comment') || scenario === 'escalation-review' ? [verdict, comment] : [verdict]);",
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
-    "  if (path === '/issues/17/comments' && scenario === 'repair-attempt-head-sync') return response([{ id: 777, body: '<!-- review-relay:v1:example/project:pr:17:head:' + 'b'.repeat(40) + ':review:700:version:2026-10-14T12:00:00Z -->\\n**Repair continuation attempt:** previously recorded' }]);",
+    "  if (path === '/issues/17/comments' && ['repair-dispatch-head-sync', 'repair-dispatch-outcome-approved', 'repair-dispatch-outcome-active', 'repair-dispatch-outcome-failed'].includes(scenario)) return response([{ id: 777, created_at: '2026-10-15T12:00:00Z', body: '<!-- review-relay:v1:example/project:pr:17:head:' + 'b'.repeat(40) + ':review:700:version:2026-10-14T12:00:00Z -->\\n- Existing claim ID: claim-12-test\\n- Existing Jules session ID: session-1\\n**Repair continuation attempt:** previously recorded' }]);",
     "  if (path === '/issues/17/comments') return response(['repair-duplicate', 'repair-dispatch-duplicate', 'repair-dispatch-duplicate-completed'].includes(scenario) ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' + (scenario.startsWith('repair-dispatch-duplicate') ? '\\n**Repair continuation attempt:** previously recorded' : '') }] : []);",
     "  if (path === '/git/ref/heads/autoloop-state') return response({ object: { sha: 'c'.repeat(40) } });",
     "  if (path === '/contents/claims.json') return response({ encoding: 'base64', content: Buffer.from(JSON.stringify({ claims: [claim] })).toString('base64') });",
@@ -277,14 +277,16 @@ test('head synchronization invalidates the check and reports current-head eviden
 });
 
 test('new PR head links a prior repair attempt but never assumes provider success', t => {
-  const result = runRelay(t, 'repair-attempt-head-sync', 'trusted-reviewer', 'pull_request_target');
+  const result = runRelay(t, 'repair-dispatch-head-sync', 'trusted-reviewer', 'pull_request_target');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.report.decisionCode, 'HEAD_CHANGED_REVIEW_REQUIRED');
   assert.equal(result.report.checkConclusion, 'action_required');
   assert.equal(result.report.repairEvidence.status, 'REPAIR_HEAD_ADVANCED_AWAITING_RECONCILIATION');
   assert.equal(result.report.repairEvidence.priorRepairAttempts.length, 1);
   assert.equal(result.report.repairEvidence.priorRepairAttempts[0].reviewedHeadSha, 'b'.repeat(40));
-  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].providerOutcome, 'UNRECONCILED');
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].providerOutcome, 'STILL_ACTIVE');
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].providerState, 'ACTIVE');
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].sessionIdentityVerified, true);
   assert.equal(result.report.repairEvidence.priorRepairAttempts[0].reviewId, '700');
   assert.equal(result.writes.length, 1);
   assert.equal(result.writes[0].method, 'POST');
@@ -407,10 +409,35 @@ test('an uncertain provider send is recorded and never blindly retried', t => {
 });
 
 
-test('provider secret classifier accepts only an exact trusted relay command', () => {
+test('provider secret classifier delegates to the fail-closed policy and checks head-sync events', () => {
   const workflow = readFileSync(join(templateRoot, '.github/workflows/review-relay.yml'), 'utf8');
-  assert.ok(workflow.includes("/^\\\\s*(?:\\\\[autoloop:relay-review\\\\]|@autoloop\\\\s+relay-review)\\\\s*$/i.test(String(event.comment?.body || ''))"),
-    'secret classifier must require the complete relay command, not a substring');
-  assert.ok(!workflow.includes("String(event.comment?.body || '').includes('[autoloop:relay-review]')"),
-    'substring matches must not make the provider secret available');
+  assert.match(workflow, /shouldExposeProviderAccess/);
+  assert.match(workflow, /repairHeadSync/);
+  assert.match(workflow, /repairPilotApproved === true/);
 });
+
+
+test('a relay repair approval is successful only after the exact existing session is verified completed', t => {
+  const result = runRelay(t, 'repair-dispatch-outcome-approved', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
+  assert.equal(result.report.checkConclusion, 'success');
+  assert.equal(result.report.repairEvidence.providerOutcome, 'COMPLETED');
+  assert.equal(result.report.repairEvidence.sessionIdentityVerified, true);
+  assert.equal(result.report.repairEvidence.currentHeadSha, head);
+  assert.deepEqual(result.report.repairEvidence.changedPaths, ['src/example.mjs']);
+});
+
+for (const [scenario, providerOutcome] of [
+  ['repair-dispatch-outcome-active', 'STILL_ACTIVE'],
+  ['repair-dispatch-outcome-failed', 'PROVIDER_FAILED']
+]) {
+  test(scenario + ' blocks successful repair approval until provider outcome is resolved', t => {
+    const result = runRelay(t, scenario, 'trusted-reviewer', 'workflow_run');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.report.decisionCode, 'BLOCK_REPAIR_OUTCOME_RECONCILIATION');
+    assert.equal(result.report.checkConclusion, 'action_required');
+    assert.equal(result.report.success, false);
+    assert.equal(result.report.repairEvidence.providerOutcome, providerOutcome);
+  });
+}

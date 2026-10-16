@@ -5,6 +5,7 @@ import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.
 import { reconcileSessionLifecycle } from '../src/reconciliation.mjs';
 import { extractGoverningIssueNumber } from '../src/pr-gate.mjs';
 import { JulesClient } from '../src/jules.mjs';
+import { repairPilotReady } from './provider-access.mjs';
 import { evaluateReviewRelay, evaluateRepairContinuationGate, parseEscalationDirective } from '../src/review-relay.mjs';
 
 const repositoryValue = process.env.GITHUB_REPOSITORY;
@@ -320,6 +321,84 @@ async function run() {
           status: 'REPAIR_EVIDENCE_VERIFIED_CURRENT_HEAD'
         }
       };
+
+      // A relay-dispatched repair must also reconcile the exact existing Jules
+      // session before a trusted approval can make the repair evidence successful.
+      const repairComments = await fetchAllPages('/issues/' + prNumber + '/comments');
+      const repairAttempt = repairComments
+        .filter(comment => {
+          const body = String(comment?.body || '');
+          if (!body.includes('**Repair continuation attempt:**')) return false;
+          const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
+          const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
+          const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
+          return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase()
+            && reviews.some(item => String(item?.id) === reviewId
+              && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+              && String(item?.commit_id || '').toLowerCase() === reviewedHead
+              && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())));
+        })
+        .sort((a, b) => String(b?.created_at || '').localeCompare(String(a?.created_at || ''))
+          || (Number(b?.id) || 0) - (Number(a?.id) || 0))[0] || null;
+      if (repairAttempt) {
+        const body = String(repairAttempt.body || '');
+        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
+        const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
+        const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
+        const claimId = body.match(/^- Existing claim ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || '';
+        const sessionId = body.match(/^- Existing Jules session ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || '';
+        const sourceReview = reviews.find(item => String(item?.id) === reviewId
+          && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+          && String(item?.commit_id || '').toLowerCase() === reviewedHead
+          && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase()));
+        let providerOutcome = 'BLOCKED_REPAIR_OUTCOME_RECONCILIATION_REQUIRED';
+        let providerState = null;
+        let sessionIdentityVerified = false;
+        if (!sourceReview || !claimId || !sessionId) {
+          providerOutcome = 'BLOCKED_REPAIR_ATTEMPT_CORRELATION';
+        } else if (!julesApiKey || !repairPilotReady(config)) {
+          providerOutcome = 'BLOCKED_PROVIDER_ACCESS_MISSING';
+        } else {
+          try {
+            const session = await new JulesClient({ apiKey: julesApiKey }).getSession(sessionId);
+            providerState = session.normalizedState;
+            const identityMatches = session.id === sessionId
+              && String(session.title || '').includes('[claimId: ' + claimId + ']')
+              && session.sourceContext?.source === 'sources/github/' + repositoryValue
+              && session.sourceContext?.githubRepoContext?.startingBranch === config.defaultBranch;
+            if (!identityMatches) {
+              providerOutcome = 'BLOCKED_SESSION_IDENTITY_MISMATCH';
+            } else {
+              sessionIdentityVerified = true;
+              providerOutcome = providerState === 'COMPLETED'
+                ? 'COMPLETED'
+                : providerState === 'FAILED' ? 'PROVIDER_FAILED'
+                  : (providerState === 'ACTIVE' || providerState === 'QUEUED') ? 'STILL_ACTIVE'
+                    : 'BLOCKED_PROVIDER_STATE';
+            }
+          } catch {
+            providerOutcome = 'BLOCKED_PROVIDER_LOOKUP_FAILED';
+          }
+        }
+        decision = {
+          ...decision,
+          success: providerOutcome === 'COMPLETED',
+          decisionCode: providerOutcome === 'COMPLETED' ? decision.decisionCode : 'BLOCK_REPAIR_OUTCOME_RECONCILIATION',
+          reason: providerOutcome === 'COMPLETED'
+            ? decision.reason + ' The exact existing Jules session is verified as completed.'
+            : 'The trusted review and code evidence exist, but the prior repair attempt outcome is not safely reconciled (' + providerOutcome + ').',
+          nextAction: providerOutcome === 'COMPLETED'
+            ? decision.nextAction
+            : 'Inspect the exact existing Jules session and its claim correlation. Do not treat the repair as complete or create replacement work.',
+          repairEvidence: {
+            ...decision.repairEvidence,
+            providerOutcome,
+            providerState,
+            sessionIdentityVerified,
+            priorRepairAttemptEventKey: marker
+          }
+        };
+      }
     } catch {
       decision = {
         ...decision, success: false, decisionCode: 'BLOCK_REPAIR_EVIDENCE_UNAVAILABLE',
@@ -361,16 +440,61 @@ async function run() {
         if (!marker) return [];
         const reviewedHead = marker[1].match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || null;
         const reviewId = marker[1].match(/:review:([^:]+):version:/)?.[1] || null;
+        const claimId = body.match(/^- Existing claim ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || null;
+        const sessionId = body.match(/^- Existing Jules session ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || null;
         if (!reviewedHead || reviewedHead === currentHead.toLowerCase()) return [];
         return [{
           eventKey: marker[1],
           reviewedHeadSha: reviewedHead,
           reviewId,
           commentId: Number.isInteger(Number(comment?.id)) ? Number(comment.id) : null,
-          providerOutcome: 'UNRECONCILED'
+          claimId,
+          sessionId,
+          providerOutcome: 'UNRECONCILED',
+          providerState: null,
+          sessionIdentityVerified: false
         }];
       }).sort((a, b) => String(a.reviewedHeadSha).localeCompare(String(b.reviewedHeadSha))
         || String(a.eventKey).localeCompare(String(b.eventKey)));
+
+      // When the protected Environment gate permits provider access, reconcile
+      // only the exact session and claim recorded in the durable attempt marker.
+      // This is an observation, never proof that the repair itself succeeded.
+      for (const attempt of priorRepairAttempts) {
+        if (!attempt.claimId || !attempt.sessionId) {
+          attempt.providerOutcome = 'BLOCKED_MISSING_SESSION_CORRELATION';
+          continue;
+        }
+        if (!julesApiKey || !repairPilotReady(config)) {
+          attempt.providerOutcome = 'PROVIDER_ACCESS_NOT_AUTHORIZED';
+          continue;
+        }
+        try {
+          const session = await new JulesClient({ apiKey: julesApiKey }).getSession(attempt.sessionId);
+          const expectedSource = 'sources/github/' + repositoryValue;
+          const identityMatches = session.id === attempt.sessionId
+            && String(session.title || '').includes('[claimId: ' + attempt.claimId + ']')
+            && session.sourceContext?.source === expectedSource
+            && session.sourceContext?.githubRepoContext?.startingBranch === config.defaultBranch;
+          if (!identityMatches) {
+            attempt.providerOutcome = 'BLOCKED_SESSION_IDENTITY_MISMATCH';
+            continue;
+          }
+          attempt.sessionIdentityVerified = true;
+          attempt.providerState = session.normalizedState;
+          if (session.normalizedState === 'COMPLETED') {
+            attempt.providerOutcome = 'COMPLETED_AWAITING_CURRENT_HEAD_REVIEW';
+          } else if (session.normalizedState === 'ACTIVE' || session.normalizedState === 'QUEUED') {
+            attempt.providerOutcome = 'STILL_ACTIVE';
+          } else if (session.normalizedState === 'FAILED') {
+            attempt.providerOutcome = 'PROVIDER_FAILED';
+          } else {
+            attempt.providerOutcome = 'BLOCKED_PROVIDER_STATE';
+          }
+        } catch {
+          attempt.providerOutcome = 'BLOCKED_PROVIDER_LOOKUP_FAILED';
+        }
+      }
       decision = {
         ...decision,
         repairEvidence: {
