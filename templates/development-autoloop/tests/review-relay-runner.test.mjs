@@ -83,7 +83,7 @@ function mockSource(scenario, writesPath) {
     "    if (scenario === 'no-review') return response([]);",
     "    if (scenario === 'dismissed-review') return response([{ ...trustedReview, state: 'DISMISSED' }]);",
     "    if (scenario === 'comment-only') return response([comment]);",
-    "    if (scenario === 'repair-evidence-approved') return response([priorFinding, approvedRepair]);"
+    "    if (scenario === 'repair-evidence-approved') return response([priorFinding, approvedRepair]);",
     "    return response(scenario.endsWith('-comment') || scenario === 'escalation-review' ? [verdict, comment] : [verdict]);",
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
