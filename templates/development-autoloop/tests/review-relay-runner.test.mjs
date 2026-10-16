@@ -60,8 +60,8 @@ function mockSource(scenario, writesPath) {
     "    if (url.pathname === '/v1alpha/' + source.name) return response(source);",
     "    if (url.pathname === '/v1alpha/sessions') return response({ sessions: [session] });",
     "    if (url.pathname === '/v1alpha/sessions/session-1' && (!options.method || options.method === 'GET')) return response(session);",
-    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-timeout') throw new Error('mock timeout after send attempt');
-    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-timeout') throw new Error('mock timeout after send attempt');",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
     "    throw new Error('Unexpected provider path.');",
     '  }',
     "  if (url.hostname !== 'api.github.com') throw new Error('Unexpected host.');",
