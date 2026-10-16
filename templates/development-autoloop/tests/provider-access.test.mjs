@@ -102,3 +102,19 @@ test('manual retry requires the exact command and a trusted actor', () => {
   assert.equal(shouldExposeProviderAccess({ ...args, event: { ...args.event, comment: { ...args.event.comment, body: 'please [autoloop:relay-review]' } } }), false);
   assert.equal(shouldExposeProviderAccess({ ...args, event: { ...args.event, comment: { ...args.event.comment, user: { login: 'untrusted-user' } } } }), false);
 });
+
+
+test('trusted approval exposes provider access only when a prior repair attempt needs reconciliation', () => {
+  const currentApproval = { ...priorReview, id: 701, state: 'APPROVED', commit_id: currentHead };
+  const args = {
+    eventName: 'workflow_run',
+    event: { workflow_run: { name: 'Observe PR review event (unprivileged)' } },
+    config: readyConfig,
+    pullRequest: pr,
+    reviews: [priorReview, currentApproval],
+    comments: [attemptComment]
+  };
+  assert.equal(shouldExposeProviderAccess(args), true);
+  assert.equal(shouldExposeProviderAccess({ ...args, comments: [] }), false);
+  assert.equal(shouldExposeProviderAccess({ ...args, reviews: [currentApproval] }), false);
+});
