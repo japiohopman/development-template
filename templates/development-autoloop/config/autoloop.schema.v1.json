@@ -9,6 +9,7 @@
     "schemaVersion",
     "enabled",
     "repairDispatchEnabled",
+    "repairPilotApproved",
     "defaultBranch",
     "runMode",
     "workProvider",
@@ -34,6 +35,10 @@
     },
     "repairDispatchEnabled": {
       "type": "boolean"
+    },
+    "repairPilotApproved": {
+      "type": "boolean",
+      "description": "Explicit maintainer approval for a controlled repair-dispatch pilot. Must remain false until the dispatcher and reconciliation checks are validated."
     },
     "defaultBranch": {
       "type": "string",
