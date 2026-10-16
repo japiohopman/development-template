@@ -325,18 +325,21 @@ async function run() {
       // A relay-dispatched repair must also reconcile the exact existing Jules
       // session before a trusted approval can make the repair evidence successful.
       const repairComments = await fetchAllPages('/issues/' + prNumber + '/comments');
-      const repairAttempt = repairComments.find(comment => {
-        const body = String(comment?.body || '');
-        if (!body.includes('**Repair continuation attempt:**')) return false;
-        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
-        const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
-        const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
-        return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase()
-          && reviews.some(item => String(item?.id) === reviewId
-            && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
-            && String(item?.commit_id || '').toLowerCase() === reviewedHead
-            && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())));
-      });
+      const repairAttempt = repairComments
+        .filter(comment => {
+          const body = String(comment?.body || '');
+          if (!body.includes('**Repair continuation attempt:**')) return false;
+          const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
+          const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
+          const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
+          return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase()
+            && reviews.some(item => String(item?.id) === reviewId
+              && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+              && String(item?.commit_id || '').toLowerCase() === reviewedHead
+              && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())));
+        })
+        .sort((a, b) => String(b?.created_at || '').localeCompare(String(a?.created_at || ''))
+          || (Number(b?.id) || 0) - (Number(a?.id) || 0))[0] || null;
       if (repairAttempt) {
         const body = String(repairAttempt.body || '');
         const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
