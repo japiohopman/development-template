@@ -506,7 +506,7 @@ async function run() {
       decision = {
         ...decision,
         success: false,
-        decisionCode: continuationGate.decisionCode || 'REPAIR_HANDOFF_BLOCKED',
+        decisionCode: continuationGate.decisionCode === 'BLOCK_REPAIR_CONTINUATION_CONFIG' ? 'REPAIR_HANDOFF_BLOCKED' : (continuationGate.decisionCode || 'REPAIR_HANDOFF_BLOCKED'),
         reason: continuationGate.reason || decision.reason,
         nextAction: continuationGate.nextAction || decision.nextAction,
         continuationGate
