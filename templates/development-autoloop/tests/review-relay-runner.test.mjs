@@ -85,6 +85,7 @@ function mockSource(scenario, writesPath) {
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
+    "  if (path === '/issues/17/comments' && scenario === 'repair-attempt-head-sync') return response([{ id: 777, body: '<!-- review-relay:v1:example/project:pr:17:head:' + 'b'.repeat(40) + ':review:700:version:2026-10-14T12:00:00Z -->\\\\n**Repair continuation attempt:** previously recorded' }]);",
     "  if (path === '/issues/17/comments') return response(['repair-duplicate', 'repair-dispatch-duplicate', 'repair-dispatch-duplicate-completed'].includes(scenario) ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' + (scenario.startsWith('repair-dispatch-duplicate') ? '\\n**Repair continuation attempt:** previously recorded' : '') }] : []);",
     "  if (path === '/git/ref/heads/autoloop-state') return response({ object: { sha: 'c'.repeat(40) } });",
     "  if (path === '/contents/claims.json') return response({ encoding: 'base64', content: Buffer.from(JSON.stringify({ claims: [claim] })).toString('base64') });",
@@ -253,6 +254,20 @@ test('head synchronization invalidates the check and reports current-head eviden
   assert.equal(result.report.checkConclusion, 'action_required');
   assert.equal(result.report.repairEvidence.currentHeadSha, head);
   assert.equal(result.report.repairEvidence.previousHeadTreeChanged, true);
+  assert.equal(result.writes.length, 1);
+  assert.equal(result.writes[0].method, 'PATCH');
+});
+
+test('new PR head links a prior repair attempt but never assumes provider success', t => {
+  const result = runRelay(t, 'repair-attempt-head-sync', 'trusted-reviewer', 'pull_request_target');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.decisionCode, 'HEAD_CHANGED_REVIEW_REQUIRED');
+  assert.equal(result.report.checkConclusion, 'action_required');
+  assert.equal(result.report.repairEvidence.status, 'REPAIR_HEAD_ADVANCED_AWAITING_RECONCILIATION');
+  assert.equal(result.report.repairEvidence.priorRepairAttempts.length, 1);
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].reviewedHeadSha, 'b'.repeat(40));
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].providerOutcome, 'UNRECONCILED');
+  assert.equal(result.report.repairEvidence.priorRepairAttempts[0].reviewId, '700');
   assert.equal(result.writes.length, 1);
   assert.equal(result.writes[0].method, 'PATCH');
 });
