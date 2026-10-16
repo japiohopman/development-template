@@ -34,6 +34,14 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
+      - name: Verify repository confirmation before exposing provider secrets
+        env:
+          CONFIRM_REPOSITORY: ${{ inputs.confirm_repository }}
+        run: |
+          if [ "$CONFIRM_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::Repository confirmation must exactly match this repository."
+            exit 1
+          fi
       - name: Run Autoloop plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
