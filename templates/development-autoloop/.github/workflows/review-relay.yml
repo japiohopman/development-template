@@ -106,7 +106,8 @@ jobs:
               };
               const pullRequest = await get('/pulls/' + prNumber);
               const reviews = await getAllPages('/pulls/' + prNumber + '/reviews');
-              const comments = repairHeadSync ? await getAllPages('/issues/' + prNumber + '/comments') : [];
+              const comments = (repairHeadSync || observerBridge)
+                ? await getAllPages('/issues/' + prNumber + '/comments') : [];
               needsProvider = shouldExposeProviderAccess({
                 eventName, event, config, pullRequest, reviews, comments
               });
