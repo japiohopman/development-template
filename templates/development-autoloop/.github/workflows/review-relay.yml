@@ -65,7 +65,7 @@ jobs:
           const eventName = process.env.GITHUB_EVENT_NAME;
           const trustedRetry = eventName === 'issue_comment'
             && event.issue?.pull_request
-            && /^\\s*(?:\\[autoloop:relay-review\\]|@autoloop\\s+relay-review)\\s*$/i.test(String(event.comment?.body || ''));
+            && /^\s*(?:\[autoloop:relay-review\]|@autoloop\s+relay-review)\s*$/i.test(String(event.comment?.body || ''));
           const observerBridge = eventName === 'workflow_run'
             && event.workflow_run?.name === 'Observe PR review event (unprivileged)';
           const repairHeadSync = eventName === 'pull_request_target' && event.action === 'synchronize';
