@@ -55,6 +55,10 @@ function mockSource(scenario) {
     "    return reply([issue]);",
     "  }",
     "  if (path.startsWith('/repos/example/project/pulls')) {",
+    "    if (scenario === 'pull-pagination-failure') {",
+    "      if (url.searchParams.get('page') === '2') return reply({ message: 'Internal Server Error' }, 500);",
+    "      return reply(Array.from({ length: 100 }, (_, index) => ({ number: index + 100, state: 'open', body: 'Closes #' + (index + 1), issue_number: index + 1 })));",
+    "    }",
     "    if (scenario === 'open-pr') {",
     "      return reply([{ number: 2, state: 'open', body: 'Closes #1', issue_number: 1 }]);",
     "    }",
@@ -259,6 +263,15 @@ test('an API failure during snapshot collection blocks closed with BLOCK_INCOMPL
 
 test('a failure on a later pagination page blocks instead of accepting a partial snapshot', t => {
   const result = runRunner(t, 'pagination-failure');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /page=2|HTTP 500/i);
+});
+
+test('a failure on a later open-PR pagination page blocks instead of missing duplicate work', t => {
+  const result = runRunner(t, 'pull-pagination-failure');
   assert.notEqual(result.status, 0);
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
