@@ -28,12 +28,13 @@ function buildReport({
   reason = '',
   blockers = [],
   evaluatedCandidates = [],
-  nextAction = ''
+  nextAction = '',
+  runMode = 'plan-only'
 } = {}) {
   return {
     success,
     mutated: false,
-    runMode: 'plan-only',
+    runMode,
     selectedCandidate,
     decisionCode,
     reason,
@@ -154,7 +155,7 @@ async function run() {
         return encodeURIComponent(value);
       });
       const body = { ...params };
-      for (const [, key] of match[2].matchAll(/\\{([^}]+)\\}/g)) delete body[key];
+      for (const [, key] of match[2].matchAll(/\{([^}]+)\}/g)) delete body[key];
       const response = await fetch('https://api.github.com' + path, {
         method,
         redirect: 'error',
@@ -298,6 +299,7 @@ async function run() {
     if (config.enabled !== true || config.runMode !== 'live') {
       const report = buildReport({
         success: false,
+        runMode: 'live',
         decisionCode: 'BLOCK_LIVE_DISPATCH_DISABLED',
         reason: 'Live dispatch was requested, but config must explicitly set enabled=true and runMode=live.',
         blockers: [{ code: 'LIVE_DISPATCH_NOT_ENABLED', message: 'The default configuration is plan-only and non-dispatchable.' }],
@@ -310,6 +312,7 @@ async function run() {
     if (dispatchAuthorization !== config.requiredConfirmation) {
       const report = buildReport({
         success: false,
+        runMode: 'live',
         decisionCode: 'BLOCK_DISPATCH_AUTHORIZATION',
         reason: 'The explicit dispatch authorization did not exactly match the configured confirmation phrase.',
         blockers: [{ code: 'DISPATCH_AUTHORIZATION_MISMATCH', message: 'No claim or provider session was created.' }],
@@ -322,6 +325,7 @@ async function run() {
   } else if (config.runMode === 'live' && config.enabled === true) {
     const report = buildReport({
       success: false,
+      runMode: 'live',
       decisionCode: 'BLOCK_LIVE_WORKFLOW_REQUIRED',
       reason: 'Live configuration is enabled, but this run came through the read-only plan workflow.',
       blockers: [{ code: 'LIVE_PATH_NOT_REQUESTED', message: 'The read-only workflow never mutates state or creates provider sessions.' }],
