@@ -269,7 +269,7 @@ test('new PR head links a prior repair attempt but never assumes provider succes
   assert.equal(result.report.repairEvidence.priorRepairAttempts[0].providerOutcome, 'UNRECONCILED');
   assert.equal(result.report.repairEvidence.priorRepairAttempts[0].reviewId, '700');
   assert.equal(result.writes.length, 1);
-  assert.equal(result.writes[0].method, 'PATCH');
+  assert.equal(result.writes[0].method, 'POST');
 });
 
 test('a trusted escalation writes its audit comment and a blocked check', t => {
