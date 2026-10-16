@@ -203,7 +203,7 @@ test('live dispatch requires separate exact authorization and creates no claim w
   assert.notEqual(result.status, 0);
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
-  assert.equal(result.report.runMode, 'plan-only');
+  assert.equal(result.report.runMode, 'live');
   assert.equal(result.report.decisionCode, 'BLOCK_DISPATCH_AUTHORIZATION');
   assert.match(result.report.reason, /authorization/i);
 });
@@ -217,6 +217,7 @@ test('the live workflow is manual-only, asks for explicit authorization, and sco
   assert.match(workflow, /issues: read/);
   assert.match(workflow, /pull-requests: read/);
   assert.match(workflow, /persist-credentials: false/);
+  assert.ok(workflow.indexOf('Verify repository and dispatch authorization before exposing provider secrets') < workflow.indexOf('JULES_API_KEY: ${{ secrets.JULES_API_KEY }}'));
 });
 
 test('unconfirmed repository fails closed before making API requests', t => {
