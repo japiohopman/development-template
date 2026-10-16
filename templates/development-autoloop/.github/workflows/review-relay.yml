@@ -15,6 +15,7 @@ on:
 # A trusted [autoloop:relay-review] PR comment is a safe manual retry path.
 # On a pushed head, provider access is allowed only when a durable prior repair
 # marker and its trusted changes-requested review are both verified.
+# The relay reconciles only the exact existing session named in the durable repair marker.
 # This workflow never creates a new provider session or replacement task.
 # Message acceptance is not success; outcome reconciliation remains required.
 permissions:
