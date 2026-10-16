@@ -61,3 +61,10 @@ test('Jules secret is exposed only after trusted current-head changes-requested 
   assert.match(workflow, /steps\.provider-access\.outputs\.needs_jules == \x27true\x27 && secrets\.JULES_API_KEY/);
   assert.doesNotMatch(workflow, /^\s+JULES_API_KEY:\s*\$\{\{\s*secrets\.JULES_API_KEY\s*\}\}/m);
 });
+
+test('workflow documentation accurately describes guarded continuation without creating replacement sessions', () => {
+  assert.ok(workflow.includes('name: Trusted review relay (guarded existing-session continuation)'));
+  assert.match(workflow, /never creates a new provider session or replacement task/i);
+  assert.match(workflow, /uniquely verified existing active Jules session/i);
+  assert.match(workflow, /message acceptance is not success/i);
+});
