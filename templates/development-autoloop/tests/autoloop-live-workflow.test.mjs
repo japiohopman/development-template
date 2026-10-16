@@ -34,6 +34,17 @@ test('live dispatch verifies repository, live mode, and exact authorization befo
   assert.match(live, /process\.env\.DISPATCH_AUTHORIZATION !== config\.requiredConfirmation/);
 });
 
+test('plan workflow validates repository confirmation before exposing the read-only provider secret', () => {
+  const confirmationStep = plan.indexOf('name: Verify repository confirmation before exposing provider secrets');
+  const secretUse = plan.indexOf('JULES_API_KEY: ${{ secrets.JULES_API_KEY }}');
+  const runnerStep = plan.indexOf('name: Run Autoloop plan');
+  assert.ok(confirmationStep >= 0, 'repository confirmation step must exist');
+  assert.ok(runnerStep > confirmationStep, 'plan runner must follow repository confirmation');
+  assert.ok(secretUse > runnerStep, 'provider secret must only be exposed after repository confirmation');
+  assert.match(plan, /CONFIRM_REPOSITORY.*inputs\.confirm_repository/);
+  assert.match(plan, /CONFIRM_REPOSITORY.*GITHUB_REPOSITORY/);
+});
+
 test('live workflow has only the expected minimum GitHub write permission', () => {
   const match = live.match(/^permissions:\n([\s\S]*?)\n\njobs:/m);
   assert.ok(match, 'top-level permissions must be explicit');
