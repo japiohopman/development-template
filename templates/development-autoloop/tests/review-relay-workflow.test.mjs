@@ -51,9 +51,9 @@ test('Jules secret is exposed only through the tested fail-closed policy', () =>
   assert.match(workflow, /shouldExposeProviderAccess/);
   assert.match(workflow, /repairHeadSync/);
   assert.match(workflow, /configReady/);
-  assert.match(workflow, /needs_jules=/);
-  assert.match(workflow, /steps\\.provider-access\\.outputs\\.needs_jules == \\x27true\\x27 && secrets\\.JULES_API_KEY/);
-  assert.doesNotMatch(workflow, /^\\s+JULES_API_KEY:\\s*\\$\\{\\{\\s*secrets\\.JULES_API_KEY\\s*\\}\\}/m);
+  assert.ok(workflow.includes("needs_jules=' + String(needsProvider)"));
+  assert.ok(workflow.includes("steps.provider-access.outputs.needs_jules == 'true' && secrets.JULES_API_KEY"));
+  assert.ok(!workflow.includes("JULES_API_KEY: ${{ secrets.JULES_API_KEY }}"));
 });
 
 test('workflow documentation accurately describes guarded continuation without creating replacement sessions', () => {
