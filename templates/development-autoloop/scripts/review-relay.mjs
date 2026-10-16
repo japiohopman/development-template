@@ -394,10 +394,15 @@ async function run() {
       comments = await fetchAllPages('/issues/' + prNumber + '/comments');
       const priorKeys = comments.flatMap(comment => [...String(comment?.body || '').matchAll(/<!-- (review-relay:v1:[^\s]+) -->/g)].map(match => match[1]));
       if (decision.eventKey && priorKeys.includes(decision.eventKey)) {
-        const duplicate = { ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
-          commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' };
-        emit(await publishDecisionCheck(duplicate));
-        return;
+        const priorAttempt = comments.find(comment => String(comment?.body || '').includes('<!-- ' + decision.eventKey + ' -->'));
+        const hasContinuationMarker = String(priorAttempt?.body || '').includes('**Repair continuation attempt:**');
+        if (!hasContinuationMarker) {
+          const duplicate = { ...decision, decisionCode: 'DUPLICATE_EVENT_IGNORED', success: true, requiresWrite: false,
+            commentBody: null, reason: 'This review event already has a durable audit comment. No duplicate handoff was created.' };
+          emit(await publishDecisionCheck(duplicate));
+          return;
+        }
+        // A recorded send attempt is not resent. Continue below only to reconcile its existing session.
       }
     } catch {
       fail('BLOCK_DEDUPLICATION_LOOKUP_FAILED', 'Existing PR comments could not be read before checking for a duplicate repair handoff.',
@@ -475,6 +480,46 @@ async function run() {
       trustedReviewers: config.trustedReviewers, requiredChecks: config.requiredChecks, checkRuns,
       governingIssueNumber: governing.number, existingWork, existingEventKeys: keys
     });
+  }
+
+  // A repeated delivery may reconcile an already-recorded repair attempt, but never resend it.
+  if (decision.decisionCode === 'DUPLICATE_EVENT_IGNORED' && decision.repairAttemptExists === true
+    && decision.existingWorkVerified === true && decision.sessionId && julesApiKey) {
+    try {
+      const session = await new JulesClient({ apiKey: julesApiKey }).getSession(decision.sessionId);
+      const providerState = session.normalizedState;
+      let outcome;
+      if (providerState === 'ACTIVE' || providerState === 'QUEUED') {
+        outcome = {
+          ...decision, success: false, decisionCode: 'REPAIR_PROVIDER_STILL_ACTIVE',
+          reason: 'The existing Jules session is still queued or active; the earlier message is not a completed repair.',
+          nextAction: 'Wait for an observable session/PR update. Do not resend the review event.',
+          providerState, requiresWrite: false, commentBody: null
+        };
+      } else if (providerState === 'COMPLETED') {
+        outcome = {
+          ...decision, success: false, decisionCode: 'BLOCK_REPAIR_COMPLETED_WITHOUT_NEW_HEAD',
+          reason: 'The existing Jules session is complete, but this reviewed PR head has not advanced beyond the repair-attempt head. Completion alone does not prove a repair.',
+          nextAction: 'Inspect the existing session output and PR. Require a substantive new head, current checks, and a trusted review that records addressed and remaining findings.',
+          providerState, requiresWrite: false, commentBody: null
+        };
+      } else {
+        outcome = {
+          ...decision, success: false, decisionCode: 'BLOCK_REPAIR_PROVIDER_STATE',
+          reason: 'The existing Jules session is paused, awaiting input, failed, or in an unknown state.',
+          nextAction: 'A maintainer must inspect this exact session and choose the next action. Do not resend or create replacement work.',
+          providerState, requiresWrite: false, commentBody: null
+        };
+      }
+      decision = await publishDecisionCheck(outcome);
+      emit(decision);
+    } catch {
+      fail('BLOCK_REPAIR_OUTCOME_RECONCILIATION_FAILED',
+        'The existing repair attempt was found, but its provider session state could not be reconciled.',
+        'Inspect the existing session and its PR manually. Do not resend the message or create a replacement session.',
+        { pullRequestNumber: prNumber, headSha: currentHead, eventKey: decision.eventKey, sessionId: decision.sessionId });
+    }
+    return;
   }
 
   // A repair continuation is allowed only for the exact, already correlated session.
