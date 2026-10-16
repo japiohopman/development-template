@@ -45,7 +45,7 @@ function mockSource(scenario, writesPath) {
     'const check = ' + JSON.stringify(check) + ';',
     'const claim = ' + JSON.stringify(claim) + ';',
     'const source = ' + JSON.stringify(source) + ';',
-    'const session = ' + JSON.stringify(session) + ';',
+    'const session = ' + JSON.stringify({ ...session, state: ['repair-dispatch-completed', 'repair-dispatch-duplicate-completed'].includes(scenario) ? 'COMPLETED' : scenario === 'repair-dispatch-failed' ? 'FAILED' : 'IN_PROGRESS' }) + ';',
     "const repair = scenario.startsWith('repair-');",
     "const verdict = repair ? { ...trustedReview, state: 'CHANGES_REQUESTED' } : trustedReview;",
     "const comment = { ...trustedReview, id: 502, state: 'COMMENTED', submitted_at: '2026-10-14T12:01:00Z', body: scenario === 'escalation-review' ? '[autoloop:escalate] Need a human decision.' : 'Thanks.' };",
@@ -55,10 +55,13 @@ function mockSource(scenario, writesPath) {
     '  const url = new URL(String(input));',
     "  if (options.method && options.method !== 'GET') appendFileSync(writesPath, JSON.stringify({ path: url.pathname, method: options.method, body: JSON.parse(options.body) }) + '\\n');",
     "  if (url.hostname === 'jules.googleapis.com') {",
-    "    if (!repair || (options.method && options.method !== 'GET')) throw new Error('Unexpected provider call.');",
+    "    if (!repair) throw new Error('Unexpected provider call.');",
     "    if (url.pathname === '/v1alpha/sources') return response({ sources: [source] });",
     "    if (url.pathname === '/v1alpha/' + source.name) return response(source);",
     "    if (url.pathname === '/v1alpha/sessions') return response({ sessions: [session] });",
+    "    if (url.pathname === '/v1alpha/sessions/session-1' && (!options.method || options.method === 'GET')) return response(session);",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-timeout') throw new Error('mock timeout after send attempt');",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
     "    throw new Error('Unexpected provider path.');",
     '  }',
     "  if (url.hostname !== 'api.github.com') throw new Error('Unexpected host.');",
@@ -82,7 +85,7 @@ function mockSource(scenario, writesPath) {
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
-    "  if (path === '/issues/17/comments') return response(scenario === 'repair-duplicate' ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' }] : []);",
+    "  if (path === '/issues/17/comments') return response(['repair-duplicate', 'repair-dispatch-duplicate', 'repair-dispatch-duplicate-completed'].includes(scenario) ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' + (scenario.startsWith('repair-dispatch-duplicate') ? '\\n**Repair continuation attempt:** previously recorded' : '') }] : []);",
     "  if (path === '/git/ref/heads/autoloop-state') return response({ object: { sha: 'c'.repeat(40) } });",
     "  if (path === '/contents/claims.json') return response({ encoding: 'base64', content: Buffer.from(JSON.stringify({ claims: [claim] })).toString('base64') });",
     "  if (path === '/branches/main') return response({ name: 'main' });",
@@ -102,6 +105,15 @@ function runRelay(t, scenario, commentActor = 'trusted-reviewer', trigger = 'iss
   config.trustedReviewers = ['trusted-reviewer'];
   config.requiredChecks = ['Template validation'];
   config.workProvider = 'jules';
+  if (scenario.startsWith('repair-dispatch-') && scenario !== 'repair-dispatch-duplicate') {
+    config.enabled = true;
+    config.runMode = 'live';
+    config.repairDispatchEnabled = true;
+    config.repairPilotApproved = true;
+    config.humanReadinessRequired = true;
+    config.automaticMerge = false;
+    config.scheduleEnabled = false;
+  }
   const configPath = join(directory, 'autoloop.json');
   const eventPath = join(directory, 'event.json');
   const preloadPath = join(directory, 'mock-fetch.mjs');
@@ -313,4 +325,50 @@ test('a duplicate changes-requested event preserves its audit marker without a n
   assert.equal(result.report.decisionCode, 'DUPLICATE_EVENT_IGNORED');
   assert.equal(result.writes.length, 1);
   assert.equal(result.writes[0].path, '/repos/example/project/check-runs');
+});
+
+
+test('enabled repair continuation sends one follow-up to the verified existing session and stays action-required', t => {
+  const result = runRelay(t, 'repair-dispatch-enabled', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'REPAIR_MESSAGE_ACCEPTED_AWAITING_RECONCILIATION');
+  assert.equal(result.report.providerMessageAccepted, true);
+  assert.equal(result.report.checkConclusion, 'action_required');
+  assert.equal(result.report.success, false);
+  assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions/session-1:sendMessage').length, 1);
+  assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions').length, 0);
+  assert.equal(result.writes.filter(write => write.path === '/repos/example/project/issues/17/comments').length, 1);
+});
+
+test('repair continuation stays blocked by default and never sends a provider message', t => {
+  const result = runRelay(t, 'repair-comment', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.report.decisionCode, 'REPAIR_HANDOFF_BLOCKED');
+  assert.equal(result.report.continuationGate.allowed, false);
+  assert.ok(result.report.continuationGate.failedGates.includes('enabled'));
+  assert.equal(result.writes.some(write => String(write.path).includes(':sendMessage')), false);
+});
+
+
+test('a repeated repair event reconciles the existing active session without sending again', t => {
+  const result = runRelay(t, 'repair-dispatch-duplicate', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'REPAIR_PROVIDER_STILL_ACTIVE');
+  assert.equal(result.report.providerState, 'ACTIVE');
+  assert.equal(result.writes.some(write => String(write.path).includes(':sendMessage')), false);
+});
+
+test('a completed session with no new PR head is not reported as a successful repair', t => {
+  const result = runRelay(t, 'repair-dispatch-duplicate-completed', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'BLOCK_REPAIR_COMPLETED_WITHOUT_NEW_HEAD');
+  assert.equal(result.report.success, false);
+});
+
+
+test('an uncertain provider send is recorded and never blindly retried', t => {
+  const result = runRelay(t, 'repair-dispatch-timeout', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 1);
+  assert.equal(result.report.decisionCode, 'BLOCK_REPAIR_MESSAGE_OUTCOME_UNKNOWN');
+  assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions/session-1:sendMessage').length, 1);
+  assert.equal(result.writes.filter(write => write.path === '/repos/example/project/issues/17/comments').length, 1);
 });
