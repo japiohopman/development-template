@@ -116,7 +116,7 @@ jobs:
             // Fail closed: uncertainty must never make the provider secret available.
             needsProvider = false;
           }
-          await appendFile(output, 'needs_jules=' + String(needsProvider) + '\\n');
+          await appendFile(output, 'needs_jules=' + String(needsProvider) + '\n');
           NODE
       - name: Run guarded review relay
         env:
