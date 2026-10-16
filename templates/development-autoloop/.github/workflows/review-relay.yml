@@ -1,4 +1,4 @@
-name: Trusted review relay (guarded, no dispatch)
+name: Trusted review relay (guarded existing-session continuation)
 
 on:
   pull_request_target:
@@ -13,7 +13,10 @@ on:
 # A separate no-secret workflow observes pull_request_review events, then this
 # workflow re-reads current reviews/checks from default-branch code on workflow_run.
 # A trusted [autoloop:relay-review] PR comment is a safe manual retry path.
-# This workflow never starts a provider task.
+# This workflow never creates a new provider session or replacement task.
+# When every explicit readiness gate passes, it may send one follow-up message
+# to a uniquely verified existing active Jules session. The relay stays blocked
+# until observable reconciliation proves the outcome; message acceptance is not success.
 permissions:
   contents: read
   issues: write
