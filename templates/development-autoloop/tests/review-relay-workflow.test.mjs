@@ -59,6 +59,6 @@ test('Jules secret is exposed only through the tested fail-closed policy', () =>
 test('workflow documentation accurately describes guarded continuation without creating replacement sessions', () => {
   assert.ok(workflow.includes('name: Trusted review relay (guarded existing-session continuation)'));
   assert.match(workflow, /never creates a new provider session or replacement task/i);
-  assert.match(workflow, /exact existing session/i);
+  assert.match(workflow, /exact existing session named in the durable repair marker/i);
   assert.match(workflow, /message acceptance is not success/i);
 });
