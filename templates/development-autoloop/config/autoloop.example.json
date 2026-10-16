@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "enabled": false,
   "repairDispatchEnabled": false,
+  "repairPilotApproved": false,
   "defaultBranch": "main",
   "runMode": "dry-run",
   "workProvider": "none",
