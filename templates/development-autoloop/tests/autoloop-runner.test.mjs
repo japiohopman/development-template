@@ -34,6 +34,7 @@ function mockSource(scenario) {
     "  }",
     "  if (path.startsWith('/v1alpha/sessions')) {",
     "    if (scenario === 'sessions-failure') return reply({ message: 'Provider Error' }, 500);",
+    "    if (scenario === 'sessions-timeout') throw new Error('Jules request timed out');",
     "    return reply({ sessions: [] });",
     "  }",
     "  if (options.method && options.method !== 'GET') throw new Error('Only GET calls are allowed in this mock.');",
@@ -313,6 +314,15 @@ test('provider session list failure fails closed with BLOCK_INCOMPLETE_SNAPSHOT'
   assert.equal(result.report.mutated, false);
   assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
   assert.match(result.report.reason, /Jules API|provider sessions/i);
+});
+
+test('provider session timeout fails closed without selecting work or mutating state', t => {
+  const result = runRunner(t, 'sessions-timeout');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /timed out|timeout/i);
 });
 
 test('invalid configuration blocks before candidate selection', t => {
