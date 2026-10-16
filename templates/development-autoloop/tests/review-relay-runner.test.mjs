@@ -387,3 +387,12 @@ test('an uncertain provider send is recorded and never blindly retried', t => {
   assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions/session-1:sendMessage').length, 1);
   assert.equal(result.writes.filter(write => write.path === '/repos/example/project/issues/17/comments').length, 1);
 });
+
+
+test('provider secret classifier accepts only an exact trusted relay command', () => {
+  const workflow = readFileSync(join(templateRoot, '.github/workflows/review-relay.yml'), 'utf8');
+  assert.ok(workflow.includes("/^\\\\s*(?:\\\\[autoloop:relay-review\\\\]|@autoloop\\\\s+relay-review)\\\\s*$/i.test(String(event.comment?.body || ''))"),
+    'secret classifier must require the complete relay command, not a substring');
+  assert.ok(!workflow.includes("String(event.comment?.body || '').includes('[autoloop:relay-review]')"),
+    'substring matches must not make the provider secret available');
+});
