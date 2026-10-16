@@ -15,7 +15,7 @@
 1. Create a new private repository used only for this test. Record its full name and default branch.
 2. Copy the contents of `templates/development-autoloop/` to the repository root. The workflows must be under `.github/workflows/`, not nested under the template directory.
 3. Copy `config/autoloop.example.json` to `config/autoloop.json` without enabling live features.
-4. Review the copied workflow permissions and branch protection. Do not add a Jules key for the plan-only test.
+4. Review the copied workflow permissions and branch protection. The plan-only runner needs `JULES_API_KEY` for read-only session inventory; do not add it until the owner explicitly approves that read-only provider access for this disposable repository.
 5. Initialize the configured state branch (default: `autoloop-state`) and a valid `claims.json` containing an empty `claims` array. Do not interpret a missing state branch or file as an empty queue.
 6. Add one deliberately simple test Issue that has the required sections, configured ready labels, no unresolved dependencies, no linked open PR, and no active claim. Do not use a real project task.
 
@@ -26,7 +26,7 @@
 3. Expected: the report identifies the eligible test Issue (or gives a clear blocker), says `mutated: false`, and does not create a claim, Jules session, Issue comment, branch, or PR.
 4. Repeat the same workflow once. Expected: the same input and repository state produce the same selection/blocker and still no mutation.
 5. Test the fail-closed paths by using an incorrect repository confirmation, an unavailable/invalid state branch, and an incomplete pagination/API response in mocked tests. Expected: a structured block, no mutation, and an explicit safe next action.
-6. Verify the workflow run logs contain no secret values. Do not add a real provider key merely to test plan-only behavior.
+6. Verify the workflow run logs contain no secret values. Negative tests that stop before provider inventory can run without a provider key. A successful full plan-only snapshot requires the read-only `JULES_API_KEY` Environment secret; add it only after the owner explicitly approves that access for this disposable repository, and never use it to create a session.
 
 ## 3. Live one-task smoke test — requires separate explicit approval
 
