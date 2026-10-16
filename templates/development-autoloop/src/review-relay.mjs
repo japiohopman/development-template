@@ -292,3 +292,93 @@ export function evaluateReviewRelay({
       ...(repairDisposition ? { repairDisposition } : {})
     });
 }
+
+
+/**
+ * Decide whether a trusted changes-requested review may be sent to the already
+ * correlated Jules session. This is a pure gate; it never calls a provider.
+ */
+export function evaluateRepairContinuationGate({
+  config,
+  repositoryFullName,
+  pullRequest,
+  governingIssueNumber,
+  existingWork,
+  session
+} = {}) {
+  const repository = lower(repositoryFullName);
+  const parts = repository.split('/');
+  const expectedSource = parts.length === 2 ? 'sources/github/' + parts[0] + '/' + parts[1] : '';
+  const headSha = lower(pullRequest?.head?.sha);
+  const gates = [
+    ['enabled', config?.enabled === true],
+    ['live_mode', config?.runMode === 'live'],
+    ['repair_dispatch_enabled', config?.repairDispatchEnabled === true],
+    ['repair_pilot_approved', config?.repairPilotApproved === true],
+    ['human_readiness_required', config?.humanReadinessRequired === true],
+    ['automatic_merge_disabled', config?.automaticMerge === false],
+    ['schedule_disabled', config?.scheduleEnabled === false]
+  ];
+  const failedGates = gates.filter(([, passed]) => !passed).map(([name]) => name);
+  if (failedGates.length) {
+    return {
+      allowed: false, decisionCode: 'BLOCK_REPAIR_CONTINUATION_CONFIG',
+      failedGates,
+      reason: 'Repair continuation is not explicitly enabled by every required safety setting.',
+      nextAction: 'Keep repair dispatch blocked; review the configuration and pilot approval before enabling it.'
+    };
+  }
+  if (!validRepository(repository) || !Number.isInteger(Number(governingIssueNumber)) || Number(governingIssueNumber) < 1
+    || !Number.isInteger(Number(pullRequest?.number)) || Number(pullRequest.number) < 1
+    || String(pullRequest?.state || '').toLowerCase() !== 'open' || pullRequest?.merged === true
+    || pullRequest?.draft === true || !SHA1_PATTERN.test(headSha)) {
+    return {
+      allowed: false, decisionCode: 'BLOCK_REPAIR_CONTINUATION_PR_CONTEXT',
+      reason: 'The repository, governing Issue, open PR, or exact current head could not be verified.',
+      nextAction: 'Refresh the PR and governing Issue evidence; do not send a repair message from incomplete context.'
+    };
+  }
+  if (!existingWork || existingWork.verified !== true
+    || lower(existingWork.repositoryFullName || repository) !== repository
+    || Number(existingWork.issueNumber) !== Number(governingIssueNumber)
+    || Number(existingWork.pullRequestNumber) !== Number(pullRequest.number)
+    || !text(existingWork.claimId) || !text(existingWork.sessionId)) {
+    return {
+      allowed: false, decisionCode: 'BLOCK_REPAIR_CONTINUATION_CORRELATION',
+      reason: 'The existing claim, provider session, governing Issue, and PR are not uniquely correlated.',
+      nextAction: 'Run read-only reconciliation and resolve the exact existing-work identity. Never create a replacement session.'
+    };
+  }
+  const sessionId = text(session?.id);
+  const sourceName = text(session?.sourceContext?.source);
+  const sessionState = text(session?.normalizedState || normalizeJulesStateSafe(session?.state));
+  const sessionText = [session?.title, session?.prompt].filter(value => typeof value === 'string').join('\n');
+  const claimMarker = '[claimId: ' + text(existingWork.claimId) + ']';
+  if (sessionId !== text(existingWork.sessionId) || sourceName.toLowerCase() !== expectedSource.toLowerCase()
+    || sessionState !== 'ACTIVE' || !sessionText.includes(claimMarker)) {
+    return {
+      allowed: false, decisionCode: 'BLOCK_REPAIR_CONTINUATION_SESSION',
+      reason: 'The existing Jules session is not proven active or its ID, repository source, or claim marker does not match.',
+      nextAction: 'Inspect the existing session and claim manually. Do not send a message or start replacement work.'
+    };
+  }
+  return {
+    allowed: true, decisionCode: 'REPAIR_CONTINUATION_READY',
+    reason: 'Every explicit readiness gate and existing-session identity check passed.',
+    nextAction: 'Send one guarded follow-up to the verified existing session, then wait for observable reconciliation.',
+    repositoryFullName: repository, pullRequestNumber: Number(pullRequest.number),
+    headSha, governingIssueNumber: Number(governingIssueNumber),
+    claimId: text(existingWork.claimId), sessionId
+  };
+}
+
+function normalizeJulesStateSafe(value) {
+  const state = text(value).toUpperCase();
+  if (state === 'PLANNING' || state === 'IN_PROGRESS' || state === 'ACTIVE') return 'ACTIVE';
+  if (state === 'QUEUED') return 'QUEUED';
+  if (state === 'AWAITING_PLAN_APPROVAL' || state === 'AWAITING_USER_FEEDBACK') return 'AWAITING_INPUT';
+  if (state === 'PAUSED') return 'PAUSED';
+  if (state === 'COMPLETED') return 'COMPLETED';
+  if (state === 'FAILED') return 'FAILED';
+  return 'UNKNOWN';
+}
