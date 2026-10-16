@@ -136,6 +136,22 @@ function mockSource(scenario) {
     "        updatedAt: new Date().toISOString(),",
     "        metadata: {}",
     "      }];",
+    "    } else if (scenario === 'unknown-claim-status') {",
+    "      claimsList = [{",
+    "        schemaVersion: 1,",
+    "        claimId: 'claim-1-unknown',",
+    "        repository: { owner: 'example', repo: 'project' },",
+    "        issueNumber: 1,",
+    "        owner: 'autoloop',",
+    "        provider: 'jules',",
+    "        sessionId: null,",
+    "        createdAt: new Date().toISOString(),",
+    "        expiresAt: new Date(Date.now() + 3600000).toISOString(),",
+    "        status: 'MYSTERY',",
+    "        reconciliationStatus: 'PENDING',",
+    "        updatedAt: new Date().toISOString(),",
+    "        metadata: {}",
+    "      }];",
     "    }",
     "    const content = Buffer.from(JSON.stringify({ claims: claimsList })).toString('base64');",
     "    return reply({ encoding: 'base64', content });",
@@ -373,4 +389,14 @@ test('candidate with a RECLAIMED + RECONCILED claim is not blocked', t => {
   assert.equal(result.report.mutated, false);
   assert.equal(result.report.decisionCode, 'CANDIDATE_SELECTED');
   assert.equal(result.report.selectedCandidate.number, 1);
+});
+
+test('unknown durable claim status blocks the complete snapshot before candidate selection', t => {
+  const result = runRunner(t, 'unknown-claim-status');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.selectedCandidate, null);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /malformed claim record/i);
 });
