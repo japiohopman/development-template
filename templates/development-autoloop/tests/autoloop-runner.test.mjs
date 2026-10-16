@@ -46,6 +46,10 @@ function mockSource(scenario) {
     "    return reply(issue);",
     "  }",
     "  if (path.startsWith('/repos/example/project/issues')) {",
+    "    if (scenario === 'pagination-failure') {",
+    "      if (url.searchParams.get('page') === '2') return reply({ message: 'Internal Server Error' }, 500);",
+    "      return reply(Array.from({ length: 100 }, (_, index) => ({ ...issue, number: index + 1, title: 'Task ' + (index + 1) })));",
+    "    }",
     "    if (scenario === 'api-failure') return reply({ message: 'Internal Server Error' }, 500);",
     "    if (scenario === 'open-pr') return reply([issue, { number: 2, title: 'PR', pull_request: {} }]);",
     "    return reply([issue]);",
@@ -251,6 +255,15 @@ test('an API failure during snapshot collection blocks closed with BLOCK_INCOMPL
   assert.equal(result.report.success, false);
   assert.equal(result.report.mutated, false);
   assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+});
+
+test('a failure on a later pagination page blocks instead of accepting a partial snapshot', t => {
+  const result = runRunner(t, 'pagination-failure');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.decisionCode, 'BLOCK_INCOMPLETE_SNAPSHOT');
+  assert.match(result.report.reason, /page=2|HTTP 500/i);
 });
 
 test('missing state branch fails closed with BLOCK_INCOMPLETE_SNAPSHOT', t => {

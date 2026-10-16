@@ -8,7 +8,7 @@ Development Autoloop is a reusable GitHub workflow for managing development task
 
 The workflow is the coordinator. Code under src/ contains reusable decisions, code under scripts/ reads live data and calls those decisions, and workflows under .github/workflows/ decide when steps run and which permissions are available.
 
-**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is implemented as a manual-only, plan-first workflow in [Issue #19](https://github.com/japiohopman/development-template/issues/19). Live session creation remains disabled by default. A guarded review-relay foundation binds decisions to the exact current PR head and records deduplicated handoffs only when existing work is verified. It never starts repair sessions; the disposable consumer-repository pilot remains outstanding.
+**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is implemented as a manual-only, plan-first workflow in [Issue #19](https://github.com/japiohopman/development-template/issues/19). Live session creation remains disabled by default. A guarded review relay binds decisions to the exact current PR head and can send a gated follow-up only to a verified existing Jules session; it never creates a replacement session. Observable repair-outcome reconciliation and the disposable consumer-repository pilot remain outstanding.
 
 ## A simple way to understand the parts
 
@@ -30,9 +30,9 @@ The source code should not be mistaken for a running workflow. Each step must be
 | Durable claim | Reserve an Issue so competing runs do not knowingly start the same task. | Built and tested |
 | Provider adapter and dispatch logic | Prepare and validate a task packet for Jules and handle uncertain results carefully. | Built and tested; manual plan-first Actions dispatcher connected |
 | Session/Issue/branch/PR reconciliation | Compare provider sessions with real GitHub Issues, branches, PRs, and claims. | Read-only reconciliation built; consumer workflow is manual-only |
-| PR contract gate | Verify current-head evidence, changed paths, configured required checks, and handoff completeness. | Implemented in the Issue #7 draft; requires review and consumer configuration |
-| Trusted review relay | Accept only configured reviewers, bind verdicts to the current head, and route feedback to existing work. | Guarded event workflow and deduplicated audit handoff implemented; live repair dispatch remains blocked |
-| Complete loop and pilot | Test all steps together in a separate disposable repository. | Not built |
+| PR contract gate | Verify current-head evidence, changed paths, configured required checks, and handoff completeness. | Implemented and merged in PR #18; read-only and requires consumer configuration |
+| Trusted review relay | Accept only configured reviewers, bind verdicts to the current head, and route feedback to existing work. | Guarded continuation to a verified existing session is implemented behind explicit gates; observable outcome reconciliation and the disposable pilot remain outstanding |
+| Complete loop and pilot | Test all steps together in a separate disposable repository. | Mocked components are built; the full disposable consumer pilot has not been run |
 
 See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining sequence.
 
@@ -43,7 +43,7 @@ In the main development-template repository, the active workflow is called **Tem
 Imagine we are building a robot:
 - The checker looks at the robot's parts and tests whether they behave as expected.
 - A dispatcher is the button and wiring that tells the robot which job to do.
-- We have the checker and several robot parts. The dispatcher and the full work-and-review loop still need to be connected.
+- We have the checker, dispatcher, and guarded review components. The full work-and-review loop still needs to pass the disposable-repository pilot.
 
 ### What does Template validation check?
 
@@ -106,7 +106,7 @@ A green PR contract gate is not permission to dispatch Jules, merge a PR, or ena
 2. Copy config/autoloop.example.json to config/autoloop.json.
 3. Keep live dispatch disabled and automatic merge disabled. Configure requiredChecks with the exact check-run names the consumer repository requires. An empty list deliberately produces “not configured”, not “CI passed”.
 4. Review the permissions and workflow files before enabling any workflow in that repository.
-5. Run syntax/unit tests, inspect the gate report, and follow Issue #9's disposable-repository pilot plan before treating the complete workflow as operational.
+5. Run syntax/unit tests, inspect the gate report, and follow the [disposable consumer pilot runbook](docs/CONSUMER_PILOT_RUNBOOK.md) before treating the complete workflow as operational.
 
 The configuration is project-neutral. Do not add product-specific assumptions to the shared decision modules.
 
