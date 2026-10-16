@@ -49,7 +49,7 @@ function mockSource(scenario, writesPath) {
     "const repair = scenario.startsWith('repair-');",
     "const verdict = repair ? { ...trustedReview, state: 'CHANGES_REQUESTED' } : trustedReview;",
     "const priorFinding = { ...trustedReview, id: 700, state: 'CHANGES_REQUESTED', commit_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', body: 'Please fix the contract.' };",
-    "const approvedRepair = { ...trustedReview, body: 'Findings addressed: Updated contract validation and added regression tests.\\nFindings remaining: None.' };",
+    "const approvedRepair = { ...trustedReview, id: 701, submitted_at: '2026-10-14T12:03:00Z', body: 'Findings addressed: Updated contract validation and added regression tests.\\nFindings remaining: None.' };",
     "const comment = { ...trustedReview, id: 502, state: 'COMMENTED', submitted_at: '2026-10-14T12:01:00Z', body: scenario === 'escalation-review' ? '[autoloop:escalate] Need a human decision.' : 'Thanks.' };",
     'let prReads = 0;',
     "function response(payload, status = 200) { return { ok: status >= 200 && status < 300, status, json: async () => payload }; }",
