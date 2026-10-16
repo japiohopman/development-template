@@ -42,7 +42,7 @@ test('plan workflow validates repository confirmation before exposing the read-o
   assert.ok(runnerStep > confirmationStep, 'plan runner must follow repository confirmation');
   assert.ok(secretUse > runnerStep, 'provider secret must only be exposed after repository confirmation');
   assert.match(plan, /CONFIRM_REPOSITORY.*inputs\.confirm_repository/);
-  assert.match(plan, /CONFIRM_REPOSITORY.*GITHUB_REPOSITORY/);
+  assert.match(plan, /if \[ "\\$CONFIRM_REPOSITORY" != "\\$GITHUB_REPOSITORY" \]/);
 });
 
 test('live workflow has only the expected minimum GitHub write permission', () => {
