@@ -91,3 +91,9 @@ Follow the template's [architecture](templates/development-autoloop/docs/ARCHITE
 - Stable: a successful pilot was completed and recovery steps are documented.
 
 A green validation check is useful evidence, not proof that a template is ready to run by itself.
+
+## CodeRabbit automatic reviews
+
+The repository-level `.coderabbit.yaml` enables automatic reviews and incremental reviews for ready-for-review pull requests, while excluding Draft pull requests until they are marked ready. The Development Autoloop template includes the same configuration at its root so it can be copied into a consuming repository.
+
+**This file configures preferences; it does not install or authorize the CodeRabbit GitHub App.** A repository owner must install/authorize the app, and account or organization policies may override these settings.
