@@ -327,13 +327,13 @@ async function run() {
       const repairAttempt = repairComments.find(comment => {
         const body = String(comment?.body || '');
         if (!body.includes('**Repair continuation attempt:**')) return false;
-        const match = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+        const match = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
         const reviewedHead = match?.[1]?.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase();
         return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase());
       });
       if (repairAttempt) {
         const body = String(repairAttempt.body || '');
-        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/)?.[1] || '';
+        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
         const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
         const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
         const claimId = body.match(/^- Existing claim ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || '';
@@ -373,7 +373,7 @@ async function run() {
         }
         decision = {
           ...decision,
-          success: false,
+          success: providerOutcome === 'COMPLETED',
           decisionCode: providerOutcome === 'COMPLETED' ? decision.decisionCode : 'BLOCK_REPAIR_OUTCOME_RECONCILIATION',
           reason: providerOutcome === 'COMPLETED'
             ? decision.reason + ' The exact existing Jules session is verified as completed.'
@@ -427,7 +427,7 @@ async function run() {
       const priorRepairAttempts = priorComments.flatMap(comment => {
         const body = String(comment?.body || '');
         if (!body.includes('**Repair continuation attempt:**')) return [];
-        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
         if (!marker) return [];
         const reviewedHead = marker[1].match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || null;
         const reviewId = marker[1].match(/:review:([^:]+):version:/)?.[1] || null;
