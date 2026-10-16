@@ -58,6 +58,20 @@ function hasPriorRepairAttempt({ reviews, comments, trusted, currentHead }) {
  * Pure allow-list decision for making JULES_API_KEY available to the relay.
  * Missing/partial evidence always returns false.
  */
+function currentHeadApproved(reviews, trusted, currentHead) {
+  const latest = new Map();
+  for (const review of Array.isArray(reviews) ? reviews : []) {
+    const login = lower(review?.user?.login);
+    const state = String(review?.state || '').toUpperCase();
+    if (!trusted.has(login) || lower(review?.commit_id) !== lower(currentHead)
+      || !['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) continue;
+    const time = Date.parse(review?.submitted_at || '') || 0;
+    const previous = latest.get(login);
+    if (!previous || time > previous.time) latest.set(login, { state, time });
+  }
+  return [...latest.values()].some(review => review.state === 'APPROVED');
+}
+
 export function shouldExposeProviderAccess({
   eventName, event = {}, config = {}, pullRequest = null, reviews = [], comments = []
 } = {}) {
@@ -75,7 +89,9 @@ export function shouldExposeProviderAccess({
 
   if (eventName === 'workflow_run') {
     if (event.workflow_run?.name !== 'Observe PR review event (unprivileged)') return false;
-    return currentHeadChangesRequested(reviews, trusted, currentHead);
+    if (currentHeadChangesRequested(reviews, trusted, currentHead)) return true;
+    return currentHeadApproved(reviews, trusted, currentHead)
+      && hasPriorRepairAttempt({ reviews, comments, trusted, currentHead });
   }
 
   if (eventName === 'pull_request_target' && String(event.action || '').toLowerCase() === 'synchronize') {
