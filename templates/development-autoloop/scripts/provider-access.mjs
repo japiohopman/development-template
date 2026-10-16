@@ -37,7 +37,7 @@ function hasPriorRepairAttempt({ reviews, comments, trusted, currentHead }) {
   for (const comment of Array.isArray(comments) ? comments : []) {
     const body = String(comment?.body || '');
     if (!body.includes('**Repair continuation attempt:**')) continue;
-    const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+    const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
     if (!marker) continue;
     const parsed = marker[1].match(/:head:([0-9a-f]{40}):review:([^:]+):version:/i);
     if (!parsed) continue;
