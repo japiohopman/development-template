@@ -45,7 +45,7 @@ function mockSource(scenario, writesPath) {
     'const check = ' + JSON.stringify(check) + ';',
     'const claim = ' + JSON.stringify(claim) + ';',
     'const source = ' + JSON.stringify(source) + ';',
-    'const session = ' + JSON.stringify(session) + ';',
+    'const session = ' + JSON.stringify({ ...session, state: scenario === 'repair-dispatch-completed' ? 'COMPLETED' : scenario === 'repair-dispatch-failed' ? 'FAILED' : 'IN_PROGRESS' }) + ';',
     "const repair = scenario.startsWith('repair-');",
     "const verdict = repair ? { ...trustedReview, state: 'CHANGES_REQUESTED' } : trustedReview;",
     "const comment = { ...trustedReview, id: 502, state: 'COMMENTED', submitted_at: '2026-10-14T12:01:00Z', body: scenario === 'escalation-review' ? '[autoloop:escalate] Need a human decision.' : 'Thanks.' };",
@@ -60,7 +60,8 @@ function mockSource(scenario, writesPath) {
     "    if (url.pathname === '/v1alpha/' + source.name) return response(source);",
     "    if (url.pathname === '/v1alpha/sessions') return response({ sessions: [session] });",
     "    if (url.pathname === '/v1alpha/sessions/session-1' && (!options.method || options.method === 'GET')) return response(session);",
-    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-timeout') throw new Error('mock timeout after send attempt');
+    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
     "    throw new Error('Unexpected provider path.');",
     '  }',
     "  if (url.hostname !== 'api.github.com') throw new Error('Unexpected host.');",
@@ -84,7 +85,7 @@ function mockSource(scenario, writesPath) {
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs')) return response({ check_runs: [scenario === 'failed-check' ? { ...check, conclusion: 'failure' } : check] });",
-    "  if (path === '/issues/17/comments') return response(scenario === 'repair-duplicate' ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' }] : []);",
+    "  if (path === '/issues/17/comments') return response(['repair-duplicate', 'repair-dispatch-duplicate'].includes(scenario) ? [{ body: '<!-- review-relay:v1:example/project:pr:17:head:' + pullRequest.head.sha + ':review:501:version:' + trustedReview.submitted_at + ' -->' + (scenario === 'repair-dispatch-duplicate' ? '\\n**Repair continuation attempt:** previously recorded' : '') }] : []);",
     "  if (path === '/git/ref/heads/autoloop-state') return response({ object: { sha: 'c'.repeat(40) } });",
     "  if (path === '/contents/claims.json') return response({ encoding: 'base64', content: Buffer.from(JSON.stringify({ claims: [claim] })).toString('base64') });",
     "  if (path === '/branches/main') return response({ name: 'main' });",
@@ -104,7 +105,7 @@ function runRelay(t, scenario, commentActor = 'trusted-reviewer', trigger = 'iss
   config.trustedReviewers = ['trusted-reviewer'];
   config.requiredChecks = ['Template validation'];
   config.workProvider = 'jules';
-  if (scenario === 'repair-dispatch-enabled') {
+  if (scenario.startsWith('repair-dispatch-') && scenario !== 'repair-dispatch-duplicate') {
     config.enabled = true;
     config.runMode = 'live';
     config.repairDispatchEnabled = true;
@@ -345,4 +346,20 @@ test('repair continuation stays blocked by default and never sends a provider me
   assert.equal(result.report.continuationGate.allowed, false);
   assert.ok(result.report.continuationGate.failedGates.includes('enabled'));
   assert.equal(result.writes.some(write => String(write.path).includes(':sendMessage')), false);
+});
+
+
+test('a repeated repair event reconciles the existing active session without sending again', t => {
+  const result = runRelay(t, 'repair-dispatch-duplicate', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'REPAIR_PROVIDER_STILL_ACTIVE');
+  assert.equal(result.report.providerState, 'ACTIVE');
+  assert.equal(result.writes.some(write => String(write.path).includes(':sendMessage')), false);
+});
+
+test('a completed session with no new PR head is not reported as a successful repair', t => {
+  const result = runRelay(t, 'repair-dispatch-completed', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'REPAIR_MESSAGE_ACCEPTED_AWAITING_RECONCILIATION');
+  assert.equal(result.report.success, false);
 });
