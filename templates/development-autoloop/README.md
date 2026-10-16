@@ -8,7 +8,7 @@ Development Autoloop is a reusable GitHub workflow for managing development task
 
 The workflow is the coordinator. Code under src/ contains reusable decisions, code under scripts/ reads live data and calls those decisions, and workflows under .github/workflows/ decide when steps run and which permissions are available.
 
-**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is implemented as a manual-only, plan-first workflow in [Issue #19](https://github.com/japiohopman/development-template/issues/19). Live session creation remains disabled by default, the trusted review relay is not connected end to end, and the disposable consumer-repository pilot remains outstanding.
+**Status: Foundation — not ready for unattended or scheduled use.** The catalog's checks do not start Jules. The connection from preflight to an executable Actions dispatcher is implemented as a manual-only, plan-first workflow in [Issue #19](https://github.com/japiohopman/development-template/issues/19). Live session creation remains disabled by default. A guarded review-relay foundation binds decisions to the exact current PR head and records deduplicated handoffs only when existing work is verified. It never starts repair sessions; the disposable consumer-repository pilot remains outstanding.
 
 ## A simple way to understand the parts
 
@@ -31,7 +31,7 @@ The source code should not be mistaken for a running workflow. Each step must be
 | Provider adapter and dispatch logic | Prepare and validate a task packet for Jules and handle uncertain results carefully. | Built and tested; manual plan-first Actions dispatcher connected |
 | Session/Issue/branch/PR reconciliation | Compare provider sessions with real GitHub Issues, branches, PRs, and claims. | Read-only reconciliation built; consumer workflow is manual-only |
 | PR contract gate | Verify current-head evidence, changed paths, configured required checks, and handoff completeness. | Implemented in the Issue #7 draft; requires review and consumer configuration |
-| Trusted review relay | Turn trusted approve/changes-requested decisions into safe, non-duplicated next steps. | Not built |
+| Trusted review relay | Accept only configured reviewers, bind verdicts to the current head, and route feedback to existing work. | Guarded event workflow and deduplicated audit handoff implemented; live repair dispatch remains blocked |
 | Complete loop and pilot | Test all steps together in a separate disposable repository. | Not built |
 
 See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining sequence.
@@ -52,6 +52,20 @@ Its execution path:
 - Evaluates candidate selection deterministically (`selectCandidateIssue`).
 - Produces a plain-language plan report outputting the selected candidate (or blocker / eligibility reason), mutation status (`mutated: false`), and safe next action.
 - Operates strictly side-effect free: no claims are written, no provider sessions are created, and no Issues or PRs are mutated.
+
+### Trusted review relay
+
+The consumer workflow `.github/workflows/review-relay.yml` and runner `scripts/review-relay.mjs` handle PR head changes automatically from trusted default-branch code. A submitted review is observed by `.github/workflows/review-relay-observer.yml`, which has no secrets, no write permissions, and does not check out or execute repository code. It then wakes the privileged workflow through `workflow_run`, where trusted default-branch code re-reads current reviews and check runs from GitHub. This bridge avoids giving the Jules secret to a `pull_request_review` merge-ref workflow. Fork PR reviews are not bridged automatically because `workflow_run.pull_requests` is empty for forks. A configured trusted reviewer can post `[autoloop:relay-review]` as a manual retry, including for fork PRs. The workflow never checks out or executes the pull-request head. Configure `trustedReviewers` with exact GitHub logins and configure non-empty `requiredChecks` with exact check-run names; without those settings, review approval cannot advance.
+
+The privileged relay uses the protected `autoloop-dispatch` Environment. Manually configure its `JULES_API_KEY` Environment secret for the changes-requested handoff path only: that path reads provider state to verify existing work. Approvals, head synchronization, and escalation do not need the key. GitHub automatically supplies `GITHUB_TOKEN` with `contents: read`, `pull-requests: read`, `checks: write`, and `issues: write`; do not create a custom token for the relay. These write permissions let trusted workflow code alter check conclusions and post PR audit comments, and the provider key grants access to Jules. Compromised default-branch code or actions could misuse those capabilities. Restrict Environment access to the default branch, review workflow changes, and keep actions pinned to reviewed commit SHAs.
+
+Only trusted review decisions on the current PR head count. Approvals are blocked unless every required check passed on that same SHA. A new commit invalidates previous approval evidence. Generic comments and acknowledgements (including 👀) do not count as verdicts; escalation requires an explicit `[autoloop:escalate] reason` from a configured trusted reviewer.
+
+Decisions from re-read reviews, head synchronization, or trusted escalation are persisted as the managed GitHub check run `Autoloop trusted review relay` on the exact PR head; a repeat updates the same check rather than creating a second result. Unrelated metadata events and comments do not overwrite it. This check is the durable per-head state signal for downstream gates. A trusted `CHANGES_REQUESTED` result triggers read-only reconciliation of the existing provider session, claim, governing Issue, branch, and PR. If exactly one task context is verified, the relay also writes one audit comment keyed by repository, PR, head SHA, review ID, and review version. For an approval after a prior changes-requested review, the reviewer must include both `Findings addressed: ...` and `Findings remaining: ...` in the review body; the runner also verifies that the current head has real changed paths and a different tree from its parent. If that context is missing/ambiguous or comment history cannot be read completely, it blocks. Duplicate deliveries find the existing marker and do not create another handoff.
+
+**This relay does not create sessions, write claims, change labels, approve PRs, or merge.** The recorded repair handoff remains blocked pending observable reconciliation and the separately reviewed pilot/readiness gate. A pushed repair is reported with its exact SHA, changed paths, required-check results and prior trusted findings, but the relay never declares those findings fixed automatically.
+
+To roll back the relay, disable `review-relay.yml` in the consuming repository's Actions settings. Existing check runs and audit comments remain; disabling the workflow does not remove them.
 
 ### PR contract gate
 
@@ -81,8 +95,9 @@ The catalog repository's settings and secrets do **not** copy into a consuming r
 1. **Create the Actions Environment:** In the consumer repository settings under **Settings → Environments**, create a GitHub Actions Environment named `autoloop-dispatch`.
 2. **Restrict Deployment Branches:** Configure `autoloop-dispatch` deployment branch policies to permit execution from the repository's default branch (`main`) only. *Note: this branch policy restriction is a manual repository setting in GitHub settings and is not created automatically by workflow YAML files.*
 3. **Store JULES_API_KEY as an Environment Secret:** Store `JULES_API_KEY` as an Environment secret within `autoloop-dispatch`. Do **not** store `JULES_API_KEY` as a repository-level secret, and avoid leaving duplicate repository-level secrets available to non-default branches. Never put API keys in configuration files, source code, test fixtures, Issues, PR bodies, or logs.
-4. **Workflow Environment Access:** Both `autoloop-dispatch.yml` and `reconcile-readonly.yml` declare `environment: autoloop-dispatch`. When executed, GitHub Actions resolves `JULES_API_KEY` through the `autoloop-dispatch` Environment boundary after verifying default-branch branch protection rules.
+4. **Workflow Environment Access:** `autoloop-dispatch.yml`, `reconcile-readonly.yml`, and `review-relay.yml` declare `environment: autoloop-dispatch`. GitHub Actions resolves the manually configured `JULES_API_KEY` through this Environment after its deployment branch policies and protection rules pass. The review relay uses the key only for read-only verification of existing work on the changes-requested handoff path; it does not require it for approvals, head synchronization, or escalation.
 5. **PR contract gate:** No custom secret is required for `pr-contract-gate.yml`. GitHub supplies standard `GITHUB_TOKEN` to Actions with read permissions.
+6. **Review relay token and observer:** GitHub automatically supplies `GITHUB_TOKEN` to `review-relay.yml` with `contents: read`, `pull-requests: read`, `checks: write`, and `issues: write` to manage its check run and audit comments. Install `review-relay-observer.yml` alongside it for the automatic review bridge; the observer needs no secrets or write permissions. Review the privileged relay's permission risks above before enabling it. Rollback means disabling `review-relay.yml`; existing check runs and audit comments remain.
 
 AUTOLOOP_STATE_BRANCH is an optional repository variable for the manual reconciliation and dispatcher workflows. It defaults to autoloop-state. Missing or uninitialized claim state is a blocker, not an empty queue.
 

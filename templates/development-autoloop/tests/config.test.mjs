@@ -128,4 +128,6 @@ test('example keeps all automation safety defaults disabled', () => {
   assert.equal(example.runMode, 'dry-run');
   assert.equal(example.automaticMerge, false);
   assert.equal(example.scheduleEnabled, false);
+  assert.equal(example.repairDispatchEnabled, false);
+  assert.equal(example.repairPilotApproved, false);
 });

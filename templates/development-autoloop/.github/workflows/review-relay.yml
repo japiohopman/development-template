@@ -1,0 +1,131 @@
+name: Trusted review relay (guarded, no dispatch)
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+  workflow_run:
+    workflows: ["Observe PR review event (unprivileged)"]
+    types: [completed]
+
+# Privileged relay events use trusted default-branch workflow code only.
+# A separate no-secret workflow observes pull_request_review events, then this
+# workflow re-reads current reviews/checks from default-branch code on workflow_run.
+# A trusted [autoloop:relay-review] PR comment is a safe manual retry path.
+# This workflow never starts a provider task.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  checks: write
+
+concurrency:
+  group: review-relay-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || 'unknown' }}
+  cancel-in-progress: false
+
+jobs:
+  review-relay:
+    name: Evaluate trusted review and existing-work handoff
+    if: ${{ github.event.pull_request.number || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0].number }}
+    runs-on: ubuntu-latest
+    environment: autoloop-dispatch
+    timeout-minutes: 8
+    steps:
+      - name: Check out trusted default-branch code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Classify whether existing-work verification needs provider access
+        id: provider-access
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, appendFile } from 'node:fs/promises';
+          const output = process.env.GITHUB_OUTPUT;
+          const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const repo = process.env.GITHUB_REPOSITORY;
+          const [owner, name] = repo.split('/');
+          const eventName = process.env.GITHUB_EVENT_NAME;
+          const trustedRetry = eventName === 'issue_comment'
+            && event.issue?.pull_request
+            && String(event.comment?.body || '').includes('[autoloop:relay-review]');
+          const observerBridge = eventName === 'workflow_run'
+            && event.workflow_run?.name === 'Observe PR review event (unprivileged)';
+          let needsProvider = false;
+          try {
+            if (trustedRetry || observerBridge) {
+              const config = JSON.parse(await readFile('config/autoloop.json', 'utf8'));
+              const trusted = new Set((config.trustedReviewers || []).map(value => String(value).toLowerCase()));
+              const repairPilotReady = config.enabled === true
+                && config.runMode === 'live'
+                && config.repairDispatchEnabled === true
+                && config.repairPilotApproved === true
+                && config.humanReadinessRequired === true
+                && config.automaticMerge === false
+                && config.scheduleEnabled === false;
+              const actor = String(event.comment?.user?.login || '').toLowerCase();
+              const prNumber = trustedRetry
+                ? event.issue.number
+                : event.workflow_run?.pull_requests?.[0]?.number;
+              if (prNumber && (!trustedRetry || trusted.has(actor))) {
+                const headers = {
+                  accept: 'application/vnd.github+json',
+                  authorization: 'Bearer ' + process.env.GITHUB_TOKEN,
+                  'x-github-api-version': '2022-11-28'
+                };
+                const get = async path => {
+                  const response = await fetch(process.env.GITHUB_API_URL + '/repos/' + owner + '/' + name + path, { headers });
+                  if (!response.ok) throw new Error('GitHub API lookup failed');
+                  return response.json();
+                };
+                const pr = await get('/pulls/' + prNumber);
+                let reviews = [];
+                for (let page = 1; page <= 10; page++) {
+                  const batch = await get('/pulls/' + prNumber + '/reviews?per_page=100&page=' + page);
+                  if (!Array.isArray(batch)) throw new Error('Unexpected reviews response');
+                  reviews.push(...batch);
+                  if (batch.length < 100) break;
+                  if (page === 10) throw new Error('Review history exceeds safe page limit');
+                }
+                const latest = new Map();
+                for (const review of reviews) {
+                  const login = String(review.user?.login || '').toLowerCase();
+                  const state = String(review.state || '').toUpperCase();
+                  if (!trusted.has(login) || review.commit_id !== pr.head.sha
+                    || !['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) continue;
+                  const time = Date.parse(review.submitted_at || '');
+                  const previous = latest.get(login);
+                  if (!previous || time > previous.time) latest.set(login, { state, time });
+                }
+                needsProvider = repairPilotReady
+                  && [...latest.values()].some(review => review.state === 'CHANGES_REQUESTED');
+              }
+            }
+          } catch {
+            // Fail closed: uncertainty must never make the provider secret available.
+            needsProvider = false;
+          }
+          await appendFile(output, 'needs_jules=' + String(needsProvider) + '\n');
+          NODE
+      - name: Run guarded review relay
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          JULES_API_KEY: ${{ steps.provider-access.outputs.needs_jules == 'true' && secrets.JULES_API_KEY || '' }}
+          AUTOLOOP_STATE_BRANCH: ${{ vars.AUTOLOOP_STATE_BRANCH || 'autoloop-state' }}
+          AUTOLOOP_CONFIG_PATH: config/autoloop.json
+        run: node scripts/review-relay.mjs
