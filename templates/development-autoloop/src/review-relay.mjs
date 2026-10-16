@@ -223,8 +223,12 @@ export function evaluateReviewRelay({
       reviewId: chosen.id, updatedAt: text(chosen.submitted_at || chosen.updated_at) || chosen.state });
     if (!key) return result('BLOCK_EVENT_ID_INVALID', 'The changes-requested review has no stable event identity.', 'Refresh review metadata and retry.', common);
     if ((existingEventKeys || []).includes(key)) return result('DUPLICATE_EVENT_IGNORED',
-      'A repair handoff audit record already exists for this trusted review event.',
-      'Continue reconciling the existing task; do not create a replacement session.', { ...common, eventKey: key });
+      'A repair attempt already exists for this trusted review event; inspect its existing session without resending.',
+      'Reconcile the existing provider session and never resend this event automatically.', {
+        ...common, eventKey: key, reviewId: chosen.id, governingIssueNumber: Number(governingIssueNumber),
+        claimId: existingWork.claimId, sessionId: existingWork.sessionId,
+        existingWorkVerified: true, repairAttemptExists: true
+      });
     if (!Number.isInteger(Number(governingIssueNumber)) || Number(governingIssueNumber) < 1) return result('BLOCK_GOVERNING_ISSUE_MISSING',
       'The PR does not identify one verifiable governing Issue in this repository.',
       'Correct the PR template Governing Issue reference before routing review feedback.', { ...common, eventKey: key, reviewId: chosen.id });
