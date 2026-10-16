@@ -48,6 +48,8 @@ function mockSource(scenario, writesPath) {
     'const session = ' + JSON.stringify({ ...session, state: ['repair-dispatch-completed', 'repair-dispatch-duplicate-completed'].includes(scenario) ? 'COMPLETED' : scenario === 'repair-dispatch-failed' ? 'FAILED' : 'IN_PROGRESS' }) + ';',
     "const repair = scenario.startsWith('repair-');",
     "const verdict = repair ? { ...trustedReview, state: 'CHANGES_REQUESTED' } : trustedReview;",
+    "const priorFinding = { ...trustedReview, id: 700, state: 'CHANGES_REQUESTED', commit_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', body: 'Please fix the contract.' };
+    "const approvedRepair = { ...trustedReview, body: 'Findings addressed: Updated contract validation and added regression tests.\\nFindings remaining: None.' };"
     "const comment = { ...trustedReview, id: 502, state: 'COMMENTED', submitted_at: '2026-10-14T12:01:00Z', body: scenario === 'escalation-review' ? '[autoloop:escalate] Need a human decision.' : 'Thanks.' };",
     'let prReads = 0;',
     "function response(payload, status = 200) { return { ok: status >= 200 && status < 300, status, json: async () => payload }; }",
@@ -81,6 +83,7 @@ function mockSource(scenario, writesPath) {
     "    if (scenario === 'no-review') return response([]);",
     "    if (scenario === 'dismissed-review') return response([{ ...trustedReview, state: 'DISMISSED' }]);",
     "    if (scenario === 'comment-only') return response([comment]);",
+    "    if (scenario === 'repair-evidence-approved') return response([priorFinding, approvedRepair]);"
     "    return response(scenario.endsWith('-comment') || scenario === 'escalation-review' ? [verdict, comment] : [verdict]);",
     '  }',
     "  if (path.startsWith('/commits/') && path.endsWith('/check-runs') && url.searchParams.get('check_name')) return response({ check_runs: scenario === 'existing-check' ? [{ id: 888, name: 'Autoloop trusted review relay', external_id: 'autoloop-review-relay:example/project:pr:17', head_sha: pullRequest.head.sha }] : [] });",
@@ -176,6 +179,21 @@ test('trusted relay command re-reads current-head approval and exact-head requir
   assert.equal(result.report.decisionCheckName, 'Autoloop trusted review relay');
   assert.equal(result.report.checkConclusion, 'success');
   assert.equal(result.report.requiresWrite, false);
+});
+
+test('a repair approval reports exact-head changed paths, checks, and trusted finding disposition', t => {
+  const result = runRelay(t, 'repair-evidence-approved', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'APPROVED_CURRENT_HEAD');
+  assert.equal(result.report.checkConclusion, 'success');
+  assert.equal(result.report.repairEvidence.status, 'REPAIR_EVIDENCE_VERIFIED_CURRENT_HEAD');
+  assert.equal(result.report.repairEvidence.currentHeadSha, head);
+  assert.deepEqual(result.report.repairEvidence.changedPaths, ['src/example.mjs']);
+  assert.equal(result.report.repairEvidence.checkEvidence[0].passed, true);
+  assert.equal(result.report.repairEvidence.findingsAddressed, 'Updated contract validation and added regression tests.');
+  assert.equal(result.report.repairEvidence.findingsRemaining, 'None.');
+  assert.equal(result.report.repairEvidence.previousHeadTreeChanged, true);
+  assert.equal(result.report.repairEvidence.priorTrustedFindings[0].reviewId, 700);
 });
 
 test('the secure workflow_run bridge automatically relays a review from the no-secret observer', t => {
