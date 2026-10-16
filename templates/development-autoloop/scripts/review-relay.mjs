@@ -357,7 +357,7 @@ async function run() {
       const priorRepairAttempts = priorComments.flatMap(comment => {
         const body = String(comment?.body || '');
         if (!body.includes('**Repair continuation attempt:**')) return [];
-        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
         if (!marker) return [];
         const reviewedHead = marker[1].match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || null;
         const reviewId = marker[1].match(/:review:([^:]+):version:/)?.[1] || null;
