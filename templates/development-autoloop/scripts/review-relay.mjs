@@ -327,9 +327,14 @@ async function run() {
       const repairAttempt = repairComments.find(comment => {
         const body = String(comment?.body || '');
         if (!body.includes('**Repair continuation attempt:**')) return false;
-        const match = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
-        const reviewedHead = match?.[1]?.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase();
-        return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase());
+        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/)?.[1] || '';
+        const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
+        const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
+        return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase()
+          && reviews.some(item => String(item?.id) === reviewId
+            && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+            && String(item?.commit_id || '').toLowerCase() === reviewedHead
+            && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase())));
       });
       if (repairAttempt) {
         const body = String(repairAttempt.body || '');
