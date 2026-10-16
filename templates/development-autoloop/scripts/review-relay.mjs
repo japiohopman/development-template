@@ -357,20 +357,65 @@ async function run() {
       const priorRepairAttempts = priorComments.flatMap(comment => {
         const body = String(comment?.body || '');
         if (!body.includes('**Repair continuation attempt:**')) return [];
-        const marker = body.match(/<!-- (review-relay:v1:[^\s]+) -->/);
+        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
         if (!marker) return [];
         const reviewedHead = marker[1].match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || null;
         const reviewId = marker[1].match(/:review:([^:]+):version:/)?.[1] || null;
+        const claimId = body.match(/^- Existing claim ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || null;
+        const sessionId = body.match(/^- Existing Jules session ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || null;
         if (!reviewedHead || reviewedHead === currentHead.toLowerCase()) return [];
         return [{
           eventKey: marker[1],
           reviewedHeadSha: reviewedHead,
           reviewId,
           commentId: Number.isInteger(Number(comment?.id)) ? Number(comment.id) : null,
-          providerOutcome: 'UNRECONCILED'
+          claimId,
+          sessionId,
+          providerOutcome: 'UNRECONCILED',
+          providerState: null,
+          sessionIdentityVerified: false
         }];
       }).sort((a, b) => String(a.reviewedHeadSha).localeCompare(String(b.reviewedHeadSha))
         || String(a.eventKey).localeCompare(String(b.eventKey)));
+
+      // When the protected Environment gate permits provider access, reconcile
+      // only the exact session and claim recorded in the durable attempt marker.
+      // This is an observation, never proof that the repair itself succeeded.
+      for (const attempt of priorRepairAttempts) {
+        if (!attempt.claimId || !attempt.sessionId) {
+          attempt.providerOutcome = 'BLOCKED_MISSING_SESSION_CORRELATION';
+          continue;
+        }
+        if (!julesApiKey) {
+          attempt.providerOutcome = 'PROVIDER_ACCESS_NOT_AUTHORIZED';
+          continue;
+        }
+        try {
+          const session = await new JulesClient({ apiKey: julesApiKey }).getSession(attempt.sessionId);
+          const expectedSource = 'sources/github/' + repositoryValue;
+          const identityMatches = session.id === attempt.sessionId
+            && String(session.title || '').includes('[claimId: ' + attempt.claimId + ']')
+            && session.sourceContext?.source === expectedSource
+            && session.sourceContext?.githubRepoContext?.startingBranch === config.defaultBranch;
+          if (!identityMatches) {
+            attempt.providerOutcome = 'BLOCKED_SESSION_IDENTITY_MISMATCH';
+            continue;
+          }
+          attempt.sessionIdentityVerified = true;
+          attempt.providerState = session.normalizedState;
+          if (session.normalizedState === 'COMPLETED') {
+            attempt.providerOutcome = 'COMPLETED_AWAITING_CURRENT_HEAD_REVIEW';
+          } else if (session.normalizedState === 'ACTIVE' || session.normalizedState === 'QUEUED') {
+            attempt.providerOutcome = 'STILL_ACTIVE';
+          } else if (session.normalizedState === 'FAILED') {
+            attempt.providerOutcome = 'PROVIDER_FAILED';
+          } else {
+            attempt.providerOutcome = 'BLOCKED_PROVIDER_STATE';
+          }
+        } catch {
+          attempt.providerOutcome = 'BLOCKED_PROVIDER_LOOKUP_FAILED';
+        }
+      }
       decision = {
         ...decision,
         repairEvidence: {
