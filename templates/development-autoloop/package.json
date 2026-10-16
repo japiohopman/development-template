@@ -7,7 +7,7 @@
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
-    "check": "node --check src/preflight.mjs && node --check src/pagination.mjs && node --check src/config.mjs && node --check src/contracts.mjs && node --check src/selection.mjs && node --check src/claims.mjs && node --check src/jules.mjs && node --check src/dispatch.mjs && node --check src/reconciliation.mjs && node --check scripts/reconcile-readonly.mjs && node --check src/pr-gate.mjs && node --check scripts/pr-contract-gate.mjs && node --check src/review-relay.mjs && node --check scripts/review-relay.mjs"
+    "check": "node --check src/preflight.mjs && node --check src/pagination.mjs && node --check src/config.mjs && node --check src/contracts.mjs && node --check src/selection.mjs && node --check src/claims.mjs && node --check src/jules.mjs && node --check src/dispatch.mjs && node --check src/reconciliation.mjs && node --check scripts/reconcile-readonly.mjs && node --check src/pr-gate.mjs && node --check scripts/pr-contract-gate.mjs && node --check src/review-relay.mjs && node --check scripts/review-relay.mjs && node --check scripts/autoloop-runner.mjs"
   },
   "engines": {
     "node": ">=20"
