@@ -50,6 +50,13 @@ test('Jules secret is exposed only after trusted current-head changes-requested 
   assert.match(workflow, /Classify whether existing-work verification needs provider access/);
   assert.match(workflow, /trustedReviewers/);
   assert.match(workflow, /review\.commit_id !== pr\.head\.sha/);
+  assert.match(workflow, /config\.enabled === true/);
+  assert.match(workflow, /config\.runMode === 'live'/);
+  assert.match(workflow, /config\.repairDispatchEnabled === true/);
+  assert.match(workflow, /config\.repairPilotApproved === true/);
+  assert.match(workflow, /config\.humanReadinessRequired === true/);
+  assert.match(workflow, /config\.automaticMerge === false/);
+  assert.match(workflow, /config\.scheduleEnabled === false/);
   assert.match(workflow, /needs_jules=\x27 \+ String\(needsProvider\)/);
   assert.match(workflow, /steps\.provider-access\.outputs\.needs_jules == \x27true\x27 && secrets\.JULES_API_KEY/);
   assert.doesNotMatch(workflow, /^\s+JULES_API_KEY:\s*\$\{\{\s*secrets\.JULES_API_KEY\s*\}\}/m);
