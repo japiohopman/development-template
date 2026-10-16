@@ -122,6 +122,48 @@ test('validateDispatchPacket validates the full packet contract and rejects miss
   assert.equal(validateDispatchPacket(missingIssueBody).valid, false);
 });
 
+test('dispatchTask never creates a provider session when durable claim writes fail', async () => {
+  const config = sampleConfig();
+  const packet = samplePacket();
+  let sessionCreateCalls = 0;
+  let stateWriteAttempts = 0;
+  const stateAdapter = {
+    async readState() {
+      return { head: 'stable-state-head', claims: [] };
+    },
+    async commitStateChange() {
+      stateWriteAttempts++;
+      return { success: false, reason: 'CAS_CONFLICT', ambiguous: false };
+    }
+  };
+  const providerClient = {
+    apiKey: 'test-key',
+    async findSourceForRepository() {
+      return { name: 'sources/github/acme/autoloop' };
+    },
+    async createSession() {
+      sessionCreateCalls++;
+      throw new Error('Provider session creation must not happen without a durable claim.');
+    }
+  };
+
+  const result = await dispatchTask({
+    config,
+    packet,
+    confirmation: 'DISPATCH',
+    stateAdapter,
+    snapshot: sampleSnapshot(42),
+    providerClient
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.decisionCode, DISPATCH_CODES.DISPATCH_CLAIM_FAILED);
+  assert.match(result.reason, /CAS_CONFLICT_EXHAUSTED/);
+  assert.equal(result.claim, null);
+  assert.equal(sessionCreateCalls, 0);
+  assert.ok(stateWriteAttempts > 0, 'the state write failure should be exercised');
+});
+
 test('dispatchTask fails when autoloop is disabled', async () => {
   const config = sampleConfig({ enabled: false });
   const packet = samplePacket();
