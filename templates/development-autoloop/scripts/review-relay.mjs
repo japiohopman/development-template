@@ -5,6 +5,7 @@ import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.
 import { reconcileSessionLifecycle } from '../src/reconciliation.mjs';
 import { extractGoverningIssueNumber } from '../src/pr-gate.mjs';
 import { JulesClient } from '../src/jules.mjs';
+import { repairPilotReady } from './provider-access.mjs';
 import { evaluateReviewRelay, evaluateRepairContinuationGate, parseEscalationDirective } from '../src/review-relay.mjs';
 
 const repositoryValue = process.env.GITHUB_REPOSITORY;
@@ -352,7 +353,7 @@ async function run() {
         let sessionIdentityVerified = false;
         if (!sourceReview || !claimId || !sessionId) {
           providerOutcome = 'BLOCKED_REPAIR_ATTEMPT_CORRELATION';
-        } else if (!julesApiKey) {
+        } else if (!julesApiKey || !repairPilotReady(config)) {
           providerOutcome = 'BLOCKED_PROVIDER_ACCESS_MISSING';
         } else {
           try {
@@ -461,7 +462,7 @@ async function run() {
           attempt.providerOutcome = 'BLOCKED_MISSING_SESSION_CORRELATION';
           continue;
         }
-        if (!julesApiKey) {
+        if (!julesApiKey || !repairPilotReady(config)) {
           attempt.providerOutcome = 'PROVIDER_ACCESS_NOT_AUTHORIZED';
           continue;
         }
