@@ -38,9 +38,27 @@ See the [implementation plan](docs/IMPLEMENTATION_PLAN.md) for the remaining seq
 
 ## Which workflow do I see in the catalog Actions tab?
 
-In the main development-template repository, **Template validation** is the active workflow. It checks source-file syntax and runs unit tests. It is not the task dispatcher and does not create a Jules session.
+In the main development-template repository, the active workflow is called **Template validation**. It is a checker, not a worker.
 
-The workflows under this template's nested .github/workflows/ folder are examples for a consuming repository. GitHub does not run them from this nested directory. After installation, copy the template contents into the consumer repository so the workflow files live in .github/workflows/ at the repository root.
+Imagine we are building a robot:
+- The checker looks at the robot's parts and tests whether they behave as expected.
+- A dispatcher is the button and wiring that tells the robot which job to do.
+- We have the checker and several robot parts. The dispatcher and the full work-and-review loop still need to be connected.
+
+### What does Template validation check?
+
+The workflow lives at the repository root in [`.github/workflows/template-ci.yml`](../../.github/workflows/template-ci.yml). When relevant code or documentation changes, GitHub runs these steps:
+
+1. **Set up:** GitHub downloads the version of the code it is checking and starts Node.js 20.
+2. **Syntax checks (`npm run check`):** Node.js checks that the listed code files are written in a form it can read. This catches certain typing and syntax mistakes. It does not prove the whole system works.
+3. **Unit tests (`npm test`):** small automatic tests try lots of situations and check the answers. For example, they test whether unclear or unsafe situations are blocked.
+4. **Report:** GitHub marks the run green if both steps pass, or red if a step fails.
+
+Some tests pretend to be the Jules service by returning made-up test responses. These are called **mocks**. This lets us test timeouts, errors, and successful replies without using a real API key or creating a real Jules session.
+
+A green check means only this: **the syntax checks and automated tests passed on the exact commit being checked.** It does not mean that Jules was given work, a PR was reviewed, or the entire loop was tested from start to finish.
+
+The file `.github/workflows/ci.yml` inside this template folder is an example workflow that travels with the template. GitHub does not run that nested file as a workflow in this catalog repository; the active checker is the root workflow linked above.
 
 ### Autoloop plan dispatcher
 
