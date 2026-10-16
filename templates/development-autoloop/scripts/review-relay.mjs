@@ -320,6 +320,76 @@ async function run() {
           status: 'REPAIR_EVIDENCE_VERIFIED_CURRENT_HEAD'
         }
       };
+
+      // A relay-dispatched repair must also reconcile the exact existing Jules
+      // session before a trusted approval can make the repair evidence successful.
+      const repairComments = await fetchAllPages('/issues/' + prNumber + '/comments');
+      const repairAttempt = repairComments.find(comment => {
+        const body = String(comment?.body || '');
+        if (!body.includes('**Repair continuation attempt:**')) return false;
+        const match = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+        const reviewedHead = match?.[1]?.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase();
+        return Boolean(reviewedHead && reviewedHead !== currentHead.toLowerCase());
+      });
+      if (repairAttempt) {
+        const body = String(repairAttempt.body || '');
+        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/)?.[1] || '';
+        const reviewedHead = marker.match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || '';
+        const reviewId = marker.match(/:review:([^:]+):version:/)?.[1] || '';
+        const claimId = body.match(/^- Existing claim ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || '';
+        const sessionId = body.match(/^- Existing Jules session ID: ([A-Za-z0-9._:/-]+)$/m)?.[1] || '';
+        const sourceReview = reviews.find(item => String(item?.id) === reviewId
+          && String(item?.state || '').toUpperCase() === 'CHANGES_REQUESTED'
+          && String(item?.commit_id || '').toLowerCase() === reviewedHead
+          && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase()));
+        let providerOutcome = 'BLOCKED_REPAIR_OUTCOME_RECONCILIATION_REQUIRED';
+        let providerState = null;
+        let sessionIdentityVerified = false;
+        if (!sourceReview || !claimId || !sessionId) {
+          providerOutcome = 'BLOCKED_REPAIR_ATTEMPT_CORRELATION';
+        } else if (!julesApiKey) {
+          providerOutcome = 'BLOCKED_PROVIDER_ACCESS_MISSING';
+        } else {
+          try {
+            const session = await new JulesClient({ apiKey: julesApiKey }).getSession(sessionId);
+            providerState = session.normalizedState;
+            const identityMatches = session.id === sessionId
+              && String(session.title || '').includes('[claimId: ' + claimId + ']')
+              && session.sourceContext?.source === 'sources/github/' + repositoryValue
+              && session.sourceContext?.githubRepoContext?.startingBranch === config.defaultBranch;
+            if (!identityMatches) {
+              providerOutcome = 'BLOCKED_SESSION_IDENTITY_MISMATCH';
+            } else {
+              sessionIdentityVerified = true;
+              providerOutcome = providerState === 'COMPLETED'
+                ? 'COMPLETED'
+                : providerState === 'FAILED' ? 'PROVIDER_FAILED'
+                  : (providerState === 'ACTIVE' || providerState === 'QUEUED') ? 'STILL_ACTIVE'
+                    : 'BLOCKED_PROVIDER_STATE';
+            }
+          } catch {
+            providerOutcome = 'BLOCKED_PROVIDER_LOOKUP_FAILED';
+          }
+        }
+        decision = {
+          ...decision,
+          success: false,
+          decisionCode: providerOutcome === 'COMPLETED' ? decision.decisionCode : 'BLOCK_REPAIR_OUTCOME_RECONCILIATION',
+          reason: providerOutcome === 'COMPLETED'
+            ? decision.reason + ' The exact existing Jules session is verified as completed.'
+            : 'The trusted review and code evidence exist, but the prior repair attempt outcome is not safely reconciled (' + providerOutcome + ').',
+          nextAction: providerOutcome === 'COMPLETED'
+            ? decision.nextAction
+            : 'Inspect the exact existing Jules session and its claim correlation. Do not treat the repair as complete or create replacement work.',
+          repairEvidence: {
+            ...decision.repairEvidence,
+            providerOutcome,
+            providerState,
+            sessionIdentityVerified,
+            priorRepairAttemptEventKey: marker
+          }
+        };
+      }
     } catch {
       decision = {
         ...decision, success: false, decisionCode: 'BLOCK_REPAIR_EVIDENCE_UNAVAILABLE',
