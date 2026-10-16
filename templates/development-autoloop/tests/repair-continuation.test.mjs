@@ -50,8 +50,12 @@ for (const [field, value] of [
 }
 
 test('repair continuation blocks unknown, waiting, paused, failed, and terminal sessions', () => {
-  for (const normalizedState of ['UNKNOWN', 'QUEUED', 'AWAITING_INPUT', 'PAUSED', 'FAILED', 'COMPLETED']) {
-    const result = evaluate({ session: { ...session, normalizedState } });
+  for (const [normalizedState, state] of [
+    ['UNKNOWN', 'UNRECOGNIZED_PROVIDER_STATE'], ['QUEUED', 'QUEUED'],
+    ['AWAITING_INPUT', 'AWAITING_USER_FEEDBACK'], ['PAUSED', 'PAUSED'],
+    ['FAILED', 'FAILED'], ['COMPLETED', 'COMPLETED']
+  ]) {
+    const result = evaluate({ session: { ...session, state } });
     assert.equal(result.allowed, false, normalizedState);
     assert.equal(result.decisionCode, 'BLOCK_REPAIR_CONTINUATION_SESSION');
   }
