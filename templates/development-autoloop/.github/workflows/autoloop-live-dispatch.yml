@@ -38,6 +38,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Verify repository and dispatch authorization before exposing provider secrets
+        env:
+          CONFIRM_REPOSITORY: ${{ inputs.confirm_repository }}
+          DISPATCH_AUTHORIZATION: ${{ inputs.dispatch_authorization }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const config = JSON.parse(fs.readFileSync('config/autoloop.json', 'utf8'));
+          if (process.env.CONFIRM_REPOSITORY !== process.env.GITHUB_REPOSITORY) {
+            console.error('Blocked: repository confirmation must exactly match this repository.');
+            process.exit(1);
+          }
+          if (config.enabled !== true || config.runMode !== 'live') {
+            console.error('Blocked: config must explicitly set enabled=true and runMode=live.');
+            process.exit(1);
+          }
+          if (typeof config.requiredConfirmation !== 'string' ||
+              !config.requiredConfirmation.trim() ||
+              process.env.DISPATCH_AUTHORIZATION !== config.requiredConfirmation) {
+            console.error('Blocked: dispatch authorization does not exactly match config/autoloop.json.');
+            process.exit(1);
+          }
+          console.log('Authorization verified. Provider secrets will be made available only to the dispatch step.');
+          NODE
       - name: Dispatch exactly one task after all safety gates pass
         env:
           GITHUB_TOKEN: ${{ github.token }}
