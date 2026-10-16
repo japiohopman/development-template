@@ -65,6 +65,8 @@ test('repair continuation blocks mismatched session ID, repository source, or cl
 
 test('repair continuation blocks a PR or governing Issue mismatch', () => {
   assert.equal(evaluate({ existingWork: { ...existingWork, pullRequestNumber: 18 } }).allowed, false);
+  assert.equal(evaluate({ existingWork: { ...existingWork, repositoryFullName: undefined } }).allowed, false);
+  assert.equal(evaluate({ session: { ...session, state: 'COMPLETED', normalizedState: 'ACTIVE' } }).allowed, false);
   assert.equal(evaluate({ existingWork: { ...existingWork, issueNumber: 13 } }).allowed, false);
   assert.equal(evaluate({ governingIssueNumber: 13 }).allowed, false);
   assert.equal(evaluate({ pullRequest: { ...pullRequest, head: { sha: 'bad' } } }).allowed, false);
