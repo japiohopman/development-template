@@ -407,10 +407,9 @@ test('an uncertain provider send is recorded and never blindly retried', t => {
 });
 
 
-test('provider secret classifier accepts only an exact trusted relay command', () => {
+test('provider secret classifier delegates to the fail-closed policy and checks head-sync events', () => {
   const workflow = readFileSync(join(templateRoot, '.github/workflows/review-relay.yml'), 'utf8');
-  assert.ok(workflow.includes("/^\\\\s*(?:\\\\[autoloop:relay-review\\\\]|@autoloop\\\\s+relay-review)\\\\s*$/i.test(String(event.comment?.body || ''))"),
-    'secret classifier must require the complete relay command, not a substring');
-  assert.ok(!workflow.includes("String(event.comment?.body || '').includes('[autoloop:relay-review]')"),
-    'substring matches must not make the provider secret available');
+  assert.match(workflow, /shouldExposeProviderAccess/);
+  assert.match(workflow, /repairHeadSync/);
+  assert.match(workflow, /repairPilotApproved === true/);
 });
