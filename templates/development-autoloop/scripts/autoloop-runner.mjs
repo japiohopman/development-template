@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { validateConfig } from '../src/config.mjs';
-import { normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.mjs';
+import { GitHubStateBranchAdapter, normalizeRepositoryIdentity, validateClaimRecord } from '../src/claims.mjs';
 import { selectCandidateIssue } from '../src/selection.mjs';
+import { dispatchTask } from '../src/dispatch.mjs';
 import { reconcileSessionLifecycle } from '../src/reconciliation.mjs';
 import { JulesClient } from '../src/jules.mjs';
 
@@ -10,6 +11,8 @@ const repositoryValue = process.env.GITHUB_REPOSITORY;
 const token = process.env.GITHUB_TOKEN;
 const confirmation = process.env.CONFIRM_REPOSITORY;
 const julesApiKey = process.env.JULES_API_KEY;
+const dispatchAuthorization = process.env.DISPATCH_AUTHORIZATION;
+const liveDispatchRequested = process.env.AUTOLOOP_LIVE_DISPATCH === 'true';
 const stateBranch = process.env.AUTOLOOP_STATE_BRANCH || 'autoloop-state';
 const configPath = resolve(process.env.AUTOLOOP_CONFIG_PATH || 'config/autoloop.json');
 const currentRef = process.env.GITHUB_REF || '';
@@ -25,12 +28,13 @@ function buildReport({
   reason = '',
   blockers = [],
   evaluatedCandidates = [],
-  nextAction = ''
+  nextAction = '',
+  runMode = 'plan-only'
 } = {}) {
   return {
     success,
     mutated: false,
-    runMode: 'plan-only',
+    runMode,
     selectedCandidate,
     decisionCode,
     reason,
@@ -114,7 +118,7 @@ async function run() {
   const api = async (path, options = {}) => {
     const method = options.method || 'GET';
     if (method !== 'GET') {
-      throw new Error('Only GET requests are permitted in plan-only autoloop runner.');
+      throw new Error('Only GET requests are permitted in the snapshot reader.');
     }
     const response = await fetch('https://api.github.com' + path, {
       method: 'GET',
@@ -132,6 +136,47 @@ async function run() {
       throw error;
     }
     return response.json();
+  };
+
+  // Mutating GitHub requests are available only to the separate live workflow.
+  // The ordinary plan workflow keeps read-only token permissions.
+  const stateOctokit = {
+    async request(route, params = {}) {
+      const match = /^(GET|POST|PATCH) (\/.*)$/.exec(route);
+      if (!match) throw new Error('Unsupported GitHub state-store route.');
+      const method = match[1];
+      let path = match[2].replace(/\{([^}]+)\}/g, (_, key) => {
+        if (!(key in params) || params[key] === undefined || params[key] === null) {
+          throw new Error('Missing route parameter: ' + key);
+        }
+        const value = String(params[key]);
+        if (key === 'ref') return value.split('/').map(encodeURIComponent).join('/');
+        if (key === 'path') return value.split('/').map(encodeURIComponent).join('/');
+        return encodeURIComponent(value);
+      });
+      const body = { ...params };
+      for (const [, key] of match[2].matchAll(/\{([^}]+)\}/g)) delete body[key];
+      if (method === 'GET' && Object.keys(body).length > 0) {
+        path += '?' + new URLSearchParams(body).toString();
+      }
+      const response = await fetch('https://api.github.com' + path, {
+        method,
+        redirect: 'error',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: 'Bearer ' + token,
+          'X-GitHub-Api-Version': '2022-11-28',
+          ...(method === 'GET' ? {} : { 'Content-Type': 'application/json' })
+        },
+        ...(method === 'GET' ? {} : { body: JSON.stringify(body) })
+      });
+      if (!response.ok) {
+        const error = new Error('GitHub API HTTP ' + response.status + ' for state-store operation.');
+        error.status = response.status;
+        throw error;
+      }
+      return { data: await response.json() };
+    }
   };
 
   const fetchAllGithubPages = async (basePath) => {
@@ -253,6 +298,125 @@ async function run() {
 
   const finalSuccess = isCleanOutcome && isReconciliationClear;
 
+  if (liveDispatchRequested) {
+    if (config.enabled !== true || config.runMode !== 'live') {
+      const report = buildReport({
+        success: false,
+        runMode: 'live',
+        decisionCode: 'BLOCK_LIVE_DISPATCH_DISABLED',
+        reason: 'Live dispatch was requested, but config must explicitly set enabled=true and runMode=live.',
+        blockers: [{ code: 'LIVE_DISPATCH_NOT_ENABLED', message: 'The default configuration is plan-only and non-dispatchable.' }],
+        nextAction: 'Keep plan-only mode unless a maintainer has reviewed the safety plan and deliberately enabled live dispatch.'
+      });
+      printReport(report);
+      process.exitCode = 1;
+      return;
+    }
+    if (dispatchAuthorization !== config.requiredConfirmation) {
+      const report = buildReport({
+        success: false,
+        runMode: 'live',
+        decisionCode: 'BLOCK_DISPATCH_AUTHORIZATION',
+        reason: 'The explicit dispatch authorization did not exactly match the configured confirmation phrase.',
+        blockers: [{ code: 'DISPATCH_AUTHORIZATION_MISMATCH', message: 'No claim or provider session was created.' }],
+        nextAction: 'Rerun only after entering the exact configured dispatch authorization in the manual workflow.'
+      });
+      printReport(report);
+      process.exitCode = 1;
+      return;
+    }
+  } else if (config.runMode === 'live' && config.enabled === true) {
+    const report = buildReport({
+      success: false,
+      runMode: 'live',
+      decisionCode: 'BLOCK_LIVE_WORKFLOW_REQUIRED',
+      reason: 'Live configuration is enabled, but this run came through the read-only plan workflow.',
+      blockers: [{ code: 'LIVE_PATH_NOT_REQUESTED', message: 'The read-only workflow never mutates state or creates provider sessions.' }],
+      nextAction: 'Use the separately permissioned live-dispatch workflow with explicit authorization.'
+    });
+    printReport(report);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (liveDispatchRequested && finalSuccess && selectionResult.selectedCandidate) {
+    const issue = issues.find(item => item.number === selectionResult.selectedCandidate.number);
+    if (!issue || typeof issue.title !== 'string' || typeof issue.body !== 'string') {
+      const report = buildReport({
+        success: false,
+        decisionCode: 'BLOCK_SELECTED_ISSUE_INCOMPLETE',
+        reason: 'The selected Issue could not be bound to its exact title and body from the complete snapshot.',
+        nextAction: 'Fix the incomplete Issue data and rerun preflight before dispatch.'
+      });
+      printReport(report);
+      process.exitCode = 1;
+      return;
+    }
+    const runId = process.env.GITHUB_RUN_ID;
+    if (!runId) {
+      const report = buildReport({
+        success: false,
+        decisionCode: 'BLOCK_RUN_ID_MISSING',
+        reason: 'GitHub Actions did not provide a run ID, so a unique durable claim ID cannot be constructed safely.',
+        nextAction: 'Run this workflow from GitHub Actions and retry after confirming the run context.'
+      });
+      printReport(report);
+      process.exitCode = 1;
+      return;
+    }
+
+    const stateAdapter = new GitHubStateBranchAdapter({
+      octokit: stateOctokit,
+      repository: repo,
+      stateBranch,
+      defaultBranch
+    });
+    const packet = {
+      repository: repositoryValue,
+      issueNumber: issue.number,
+      issueTitle: issue.title,
+      issueBody: issue.body,
+      startingBranch: defaultBranch,
+      claimId: 'autoloop-' + runId + '-issue-' + issue.number,
+      prompt: [
+        'Implement the repository task described by Issue #' + issue.number + ': ' + issue.title + '.',
+        'Follow the repository instructions and the Issue contract exactly. Work only on this task; report blockers or uncertainty in the pull request body.',
+        '',
+        'Exact governing Issue body:',
+        issue.body
+      ].join('\n')
+    };
+    const dispatchResult = await dispatchTask({
+      config,
+      packet,
+      confirmation: dispatchAuthorization,
+      stateAdapter,
+      snapshot,
+      owner: 'github-actions:' + (process.env.GITHUB_ACTOR || 'unknown'),
+      providerClient: new JulesClient({ apiKey: julesApiKey })
+    });
+    const report = {
+      ...buildReport({
+        success: dispatchResult.success,
+        selectedCandidate: selectionResult.selectedCandidate,
+        decisionCode: dispatchResult.decisionCode,
+        reason: dispatchResult.reason,
+        blockers: dispatchResult.blockers || [],
+        evaluatedCandidates: selectionResult.evaluatedCandidates || [],
+        nextAction: dispatchResult.success
+          ? 'Track this exact provider session and reconcile its state before considering the task complete.'
+          : 'Do not start another task. Inspect the structured blocker and reconcile the claim/session state first.'
+      }),
+      mutated: Boolean(dispatchResult.claim),
+      runMode: 'live',
+      providerSessionId: dispatchResult.session?.id || null,
+      claimId: dispatchResult.claim?.claimId || packet.claimId
+    };
+    printReport(report);
+    if (!dispatchResult.success) process.exitCode = 1;
+    return;
+  }
+
   const report = buildReport({
     success: finalSuccess,
     selectedCandidate: finalSuccess ? selectionResult.selectedCandidate : null,
@@ -266,7 +430,8 @@ async function run() {
     evaluatedCandidates: selectionResult.evaluatedCandidates || [],
     nextAction: finalSuccess
       ? selectionResult.nextAction
-      : 'Resolve lifecycle reconciliation and candidate blockers before re-running autoloop dispatch.'
+      : 'Resolve lifecycle reconciliation and candidate blockers before re-running autoloop dispatch.',
+    runMode: liveDispatchRequested ? 'live' : 'plan-only'
   });
 
   printReport(report);

@@ -148,6 +148,11 @@ function runRunner(t, scenario, envOverrides = {}) {
 
   const exampleConfig = JSON.parse(readFileSync(join(templateRoot, 'config/autoloop.example.json'), 'utf8'));
   exampleConfig.workProvider = 'jules';
+  if (scenario === 'live-missing-auth') {
+    exampleConfig.enabled = true;
+    exampleConfig.runMode = 'live';
+    exampleConfig.requiredConfirmation = 'DISPATCH';
+  }
   const configPath = join(directory, 'autoloop.json');
   const preloadPath = join(directory, 'mock-fetch.mjs');
 
@@ -191,6 +196,28 @@ test('the actual runner selects an eligible candidate in plan-only mode without 
   assert.equal(result.report.runMode, 'plan-only');
   assert.equal(result.report.decisionCode, 'CANDIDATE_SELECTED');
   assert.equal(result.report.selectedCandidate.number, 1);
+});
+
+test('live dispatch requires separate exact authorization and creates no claim without it', t => {
+  const result = runRunner(t, 'live-missing-auth', { AUTOLOOP_LIVE_DISPATCH: 'true' });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.report.success, false);
+  assert.equal(result.report.mutated, false);
+  assert.equal(result.report.runMode, 'live');
+  assert.equal(result.report.decisionCode, 'BLOCK_DISPATCH_AUTHORIZATION');
+  assert.match(result.report.reason, /authorization/i);
+});
+
+test('the live workflow is manual-only, asks for explicit authorization, and scopes write permissions to its own workflow', () => {
+  const workflow = readFileSync(join(templateRoot, '.github/workflows/autoloop-live-dispatch.yml'), 'utf8');
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /dispatch_authorization:/);
+  assert.match(workflow, /AUTOLOOP_LIVE_DISPATCH: "true"/);
+  assert.match(workflow, /contents: write/);
+  assert.match(workflow, /issues: read/);
+  assert.match(workflow, /pull-requests: read/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.ok(workflow.indexOf('Verify repository and dispatch authorization before exposing provider secrets') < workflow.indexOf('JULES_API_KEY: ${{ secrets.JULES_API_KEY }}'));
 });
 
 test('unconfirmed repository fails closed before making API requests', t => {
