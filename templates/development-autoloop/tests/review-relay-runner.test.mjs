@@ -55,10 +55,12 @@ function mockSource(scenario, writesPath) {
     '  const url = new URL(String(input));',
     "  if (options.method && options.method !== 'GET') appendFileSync(writesPath, JSON.stringify({ path: url.pathname, method: options.method, body: JSON.parse(options.body) }) + '\\n');",
     "  if (url.hostname === 'jules.googleapis.com') {",
-    "    if (!repair || (options.method && options.method !== 'GET')) throw new Error('Unexpected provider call.');",
+    "    if (!repair) throw new Error('Unexpected provider call.');",
     "    if (url.pathname === '/v1alpha/sources') return response({ sources: [source] });",
     "    if (url.pathname === '/v1alpha/' + source.name) return response(source);",
     "    if (url.pathname === '/v1alpha/sessions') return response({ sessions: [session] });",
+    "    if (url.pathname === '/v1alpha/sessions/session-1' && (!options.method || options.method === 'GET')) return response(session);",
+    "    if (url.pathname === '/v1alpha/sessions/session-1:sendMessage' && options.method === 'POST' && scenario === 'repair-dispatch-enabled') return response({ accepted: true });",
     "    throw new Error('Unexpected provider path.');",
     '  }',
     "  if (url.hostname !== 'api.github.com') throw new Error('Unexpected host.');",
@@ -102,6 +104,15 @@ function runRelay(t, scenario, commentActor = 'trusted-reviewer', trigger = 'iss
   config.trustedReviewers = ['trusted-reviewer'];
   config.requiredChecks = ['Template validation'];
   config.workProvider = 'jules';
+  if (scenario === 'repair-dispatch-enabled') {
+    config.enabled = true;
+    config.runMode = 'live';
+    config.repairDispatchEnabled = true;
+    config.repairPilotApproved = true;
+    config.humanReadinessRequired = true;
+    config.automaticMerge = false;
+    config.scheduleEnabled = false;
+  }
   const configPath = join(directory, 'autoloop.json');
   const eventPath = join(directory, 'event.json');
   const preloadPath = join(directory, 'mock-fetch.mjs');
@@ -313,4 +324,25 @@ test('a duplicate changes-requested event preserves its audit marker without a n
   assert.equal(result.report.decisionCode, 'DUPLICATE_EVENT_IGNORED');
   assert.equal(result.writes.length, 1);
   assert.equal(result.writes[0].path, '/repos/example/project/check-runs');
+});
+
+
+test('enabled repair continuation sends one follow-up to the verified existing session and stays action-required', t => {
+  const result = runRelay(t, 'repair-dispatch-enabled', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.decisionCode, 'REPAIR_MESSAGE_ACCEPTED_AWAITING_RECONCILIATION');
+  assert.equal(result.report.providerMessageAccepted, true);
+  assert.equal(result.report.checkConclusion, 'action_required');
+  assert.equal(result.report.success, false);
+  assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions/session-1:sendMessage').length, 1);
+  assert.equal(result.writes.filter(write => write.path === '/v1alpha/sessions').length, 0);
+  assert.equal(result.writes.filter(write => write.path === '/repos/example/project/issues/17/comments').length, 1);
+});
+
+test('repair continuation stays blocked by default and never sends a provider message', t => {
+  const result = runRelay(t, 'repair-comment', 'trusted-reviewer', 'workflow_run');
+  assert.equal(result.report.decisionCode, 'REPAIR_HANDOFF_BLOCKED');
+  assert.equal(result.report.continuationGate.allowed, false);
+  assert.ok(result.report.continuationGate.failedGates.includes('enabled'));
+  assert.equal(result.writes.some(write => String(write.path).includes(':sendMessage')), false);
 });
