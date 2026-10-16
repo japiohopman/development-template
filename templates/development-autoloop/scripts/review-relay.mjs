@@ -351,6 +351,26 @@ async function run() {
           && config.trustedReviewers.some(login => String(login).toLowerCase() === String(item?.user?.login || '').toLowerCase()))
         .map(item => ({ reviewId: item.id ?? null, reviewer: item.user?.login ?? null, state: item.state,
           reviewedHeadSha: item.commit_id ?? null, body: String(item.body || '').slice(0, 1200) }));
+      // Link a newly pushed head to any durable repair-attempt marker on an older
+      // reviewed head. This is evidence of a handoff, not evidence that Jules finished.
+      const priorComments = await fetchAllPages('/issues/' + prNumber + '/comments');
+      const priorRepairAttempts = priorComments.flatMap(comment => {
+        const body = String(comment?.body || '');
+        if (!body.includes('**Repair continuation attempt:**')) return [];
+        const marker = body.match(/<!-- (review-relay:v1:[^\\s]+) -->/);
+        if (!marker) return [];
+        const reviewedHead = marker[1].match(/:head:([0-9a-f]{40}):review:/i)?.[1]?.toLowerCase() || null;
+        const reviewId = marker[1].match(/:review:([^:]+):version:/)?.[1] || null;
+        if (!reviewedHead || reviewedHead === currentHead.toLowerCase()) return [];
+        return [{
+          eventKey: marker[1],
+          reviewedHeadSha: reviewedHead,
+          reviewId,
+          commentId: Number.isInteger(Number(comment?.id)) ? Number(comment.id) : null,
+          providerOutcome: 'UNRECONCILED'
+        }];
+      }).sort((a, b) => String(a.reviewedHeadSha).localeCompare(String(b.reviewedHeadSha))
+        || String(a.eventKey).localeCompare(String(b.eventKey)));
       decision = {
         ...decision,
         repairEvidence: {
@@ -360,9 +380,12 @@ async function run() {
           previousHeadTreeChanged: Boolean(headCommit?.commit?.tree?.sha && parentCommit?.commit?.tree?.sha
             && headCommit.commit.tree.sha !== parentCommit.commit.tree.sha),
           previousTrustedFindings: priorFindings,
+          priorRepairAttempts,
           automaticFindingResolution: false,
-          status: 'WAITING_FOR_CURRENT_HEAD_REVIEW',
-          note: 'This report proves only what changed and which checks belong to this SHA. A trusted reviewer must explicitly say which findings are fixed or remain; no repair is marked satisfied automatically.'
+          status: priorRepairAttempts.length ? 'REPAIR_HEAD_ADVANCED_AWAITING_RECONCILIATION' : 'WAITING_FOR_CURRENT_HEAD_REVIEW',
+          note: priorRepairAttempts.length
+            ? 'A new head exists after a durable repair-attempt marker on an older head, but the provider outcome is not proven by this event. Reconcile the exact existing session and require current-head checks plus a trusted finding disposition; do not resend the prior attempt.'
+            : 'This report proves only what changed and which checks belong to this SHA. A trusted reviewer must explicitly say which findings are fixed or remain; no repair is marked satisfied automatically.'
         }
       };
     } catch {
